@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+.pub-cache/
+.pub/
+*.iml
+*.log
+
+# Database
+*.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/

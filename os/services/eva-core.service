@@ -1,0 +1,14 @@
+[Unit]
+Description=EVA AI OS Core Service
+After=network.target
+
+[Service]
+Type=simple
+User=aegis
+WorkingDirectory=/home/aegis/Desktop/evaAiOs
+ExecStart=/home/aegis/Desktop/evaAiOs/venv/bin/uvicorn core.eva_core.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
