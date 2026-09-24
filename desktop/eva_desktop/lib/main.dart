@@ -783,6 +783,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   final ScrollController _scrollController = ScrollController();
   final List<Map<String, dynamic>> _messages = [];
   bool _isLoading = false;
+  String? _sessionId;
   
   Timer? _typewriterTimer;
   final List<String> _pendingCharacters = [];
@@ -874,11 +875,16 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
     try {
       final request = http.Request('POST', Uri.parse('http://127.0.0.1:8000/api/v1/core/chat/stream'));
       request.headers['Content-Type'] = 'application/json';
-      request.body = json.encode({
+      
+      final body = {
         "source": "desktop",
         "input_type": "text",
         "content": text,
-      });
+      };
+      if (_sessionId != null) {
+        body["session_id"] = _sessionId;
+      }
+      request.body = json.encode(body);
 
       final response = await request.send();
 
@@ -891,6 +897,9 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
             try {
               final data = json.decode(line);
               if (data['type'] == 'metadata') {
+                if (data['data']['session_id'] != null) {
+                  _sessionId = data['data']['session_id'];
+                }
                 if (!firstMetadata) {
                   setState(() {
                     _messages.add({
@@ -1101,6 +1110,18 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
             ),
             child: Row(
             children: [
+              IconButton(
+                icon: const Icon(Icons.cleaning_services),
+                color: widget.palette.textSecondary,
+                tooltip: "Clear Conversation Context",
+                onPressed: () {
+                  setState(() {
+                    _sessionId = null;
+                    _messages.clear();
+                  });
+                },
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   controller: _controller,
