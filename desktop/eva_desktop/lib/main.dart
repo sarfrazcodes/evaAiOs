@@ -7,7 +7,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 void main() {
   runApp(const EvaOSApp());
@@ -778,8 +780,85 @@ class EvaInteractionArea extends StatefulWidget {
 
 class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   final List<Map<String, dynamic>> _messages = [];
   bool _isLoading = false;
+  
+  Timer? _typewriterTimer;
+  final List<String> _pendingCharacters = [];
+
+  void _startTypewriter() {
+    if (_typewriterTimer != null && _typewriterTimer!.isActive) return;
+    
+    _typewriterTimer = Timer.periodic(const Duration(milliseconds: 15), (timer) {
+      if (_pendingCharacters.isEmpty) {
+        timer.cancel();
+        return;
+      }
+      
+      setState(() {
+        if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
+          // If buffer gets big (e.g. fast streaming), pop more chars per tick to catch up smoothly
+          int charsToAdd = _pendingCharacters.length > 30 ? 4 : 1;
+          for (int i = 0; i < charsToAdd && _pendingCharacters.isNotEmpty; i++) {
+            _messages.last["text"] += _pendingCharacters.removeAt(0);
+          }
+        } else {
+          _pendingCharacters.clear();
+        }
+      });
+      
+      if (_scrollController.hasClients) {
+        // Use jumpTo for smooth continuous scrolling without interfering with animations
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _typewriterTimer?.cancel();
+    _controller.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToBottom() {
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _executeTask(String taskId, int messageIndex) async {
+    setState(() => _isLoading = true);
+    try {
+      final response = await http.post(
+        Uri.parse('http://127.0.0.1:8000/api/v1/core/task/$taskId/execute'),
+      );
+      if (response.statusCode == 200) {
+        final updatedTask = json.decode(response.body);
+        setState(() {
+          _messages[messageIndex]['task'] = updatedTask;
+        });
+      } else {
+        setState(() {
+          _messages.add({"sender": "system", "text": "Execute Error: ${response.statusCode}"});
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _messages.add({"sender": "system", "text": "Execute Connection failed."});
+      });
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
 
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
@@ -789,32 +868,73 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       _messages.add({"sender": "user", "text": text});
       _isLoading = true;
     });
+    _scrollToBottom();
     _controller.clear();
 
     try {
-      final response = await http.post(
-        Uri.parse('http://127.0.0.1:8000/api/v1/core/request'),
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          "source": "desktop",
-          "input_type": "text",
-          "content": text,
-        }),
-      );
+      final request = http.Request('POST', Uri.parse('http://127.0.0.1:8000/api/v1/core/chat/stream'));
+      request.headers['Content-Type'] = 'application/json';
+      request.body = json.encode({
+        "source": "desktop",
+        "input_type": "text",
+        "content": text,
+      });
+
+      final response = await request.send();
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        setState(() {
-          _messages.add({
-            "sender": "eva",
-            "text": data['message'],
-            "status": data['status'],
-            "intent": data['data'] != null ? data['data']['intent'] : null,
-            "confidence": data['data'] != null ? data['data']['confidence'] : null,
-            "route": data['data'] != null ? data['data']['route'] : null,
-            "task": data['data'] != null ? data['data']['task'] : null,
-          });
-        });
+        bool firstMetadata = false;
+        await for (var chunk in response.stream.transform(utf8.decoder)) {
+          final lines = chunk.split('\n');
+          for (var line in lines) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final data = json.decode(line);
+              if (data['type'] == 'metadata') {
+                if (!firstMetadata) {
+                  setState(() {
+                    _messages.add({
+                      "sender": "eva",
+                      "text": "",
+                      "status": "completed",
+                      "intent": data['data']['intent'],
+                      "confidence": data['data']['confidence'],
+                      "route": data['data']['route'],
+                      "task": data['data']['task'],
+                    });
+                  });
+                  firstMetadata = true;
+                }
+              } else if (data['type'] == 'task_update') {
+                setState(() {
+                  _messages.last["task"] = data['data'];
+                });
+              } else if (data['type'] == 'status') {
+                setState(() {
+                  if (data['value'] != 'thinking') {
+                     // For complex tasks, you might update the status here
+                  }
+                });
+              } else if (data['type'] == 'token') {
+                setState(() {
+                  _isLoading = false; // Hide thinking state on first token
+                });
+                final content = data['content'] as String;
+                for (int i = 0; i < content.length; i++) {
+                  _pendingCharacters.add(content[i]);
+                }
+                _startTypewriter();
+              } else if (data['type'] == 'done') {
+                setState(() {
+                  _isLoading = false;
+                });
+                _scrollToBottom();
+              }
+            } catch (e) {
+              // Ignore malformed chunks
+            }
+          }
+        }
       } else {
         setState(() {
           _messages.add({"sender": "system", "text": "Error: ${response.statusCode}"});
@@ -828,6 +948,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       setState(() {
         _isLoading = false;
       });
+      _scrollToBottom();
     }
   }
 
@@ -838,6 +959,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       children: [
         Expanded(
           child: ListView.builder(
+            controller: _scrollController,
             padding: const EdgeInsets.all(32),
             itemCount: _messages.length,
             itemBuilder: (context, index) {
@@ -847,6 +969,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
               return Align(
                 alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
                 child: Container(
+                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
                   margin: const EdgeInsets.only(bottom: 16),
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -861,18 +984,38 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        isUser ? "You" : (isSystem ? "System Error" : "EVA Core"),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: widget.palette.textSecondary,
-                          fontWeight: FontWeight.bold,
-                        ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            isUser ? "You" : (isSystem ? "System Error" : "EVA Core"),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: widget.palette.textSecondary,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 14),
+                            color: widget.palette.textSecondary,
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: msg['text']));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
+                              );
+                            },
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        msg['text'],
-                        style: TextStyle(color: widget.palette.textPrimary),
+                      MarkdownBody(
+                        data: msg['text'],
+                        styleSheet: MarkdownStyleSheet(
+                          p: TextStyle(color: widget.palette.textPrimary, fontSize: 14),
+                          strong: TextStyle(color: widget.palette.textPrimary, fontWeight: FontWeight.bold),
+                          em: TextStyle(color: widget.palette.textPrimary, fontStyle: FontStyle.italic),
+                          listBullet: TextStyle(color: widget.palette.textPrimary),
+                        ),
                       ),
                       if (!isUser && !isSystem && msg['status'] != null) ...[
                         const SizedBox(height: 8),
@@ -899,15 +1042,25 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                             (msg['task']['steps'] as List).length,
                             (i) {
                               final step = msg['task']['steps'][i];
+                              final toolInfo = step['action'] != null ? " [Tool: ${step['action']['tool']}]" : "";
+                              final errorInfo = step['error'] != null ? "\n   Error: ${step['error']['message']}" : "";
                               return Padding(
                                 padding: const EdgeInsets.only(bottom: 4.0, left: 8.0),
                                 child: Text(
-                                  "${step['sequence']}. ${step['description']}\n   [${step['status']}]",
+                                  "${step['sequence']}. ${step['description']}$toolInfo\n   Status: ${step['status']}$errorInfo",
                                   style: TextStyle(fontSize: 10, color: widget.palette.textSecondary),
                                 ),
                               );
                             },
                           ),
+                          if (msg['task']['status'] == 'planned' || msg['task']['status'] == 'action_resolution_required') ...[
+                            const SizedBox(height: 12),
+                            ElevatedButton(
+                              onPressed: () => _executeTask(msg['task']['task_id'], index),
+                              style: ElevatedButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
+                              child: const Text("Execute Plan"),
+                            ),
+                          ],
                         ]
                       ]
                     ],
@@ -918,17 +1071,35 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
           ),
         ),
         if (_isLoading)
-          const Padding(
-            padding: EdgeInsets.all(8.0),
-            child: CircularProgressIndicator(),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              margin: const EdgeInsets.only(left: 32, bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: widget.palette.cardBg,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: widget.palette.cardBorder),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.auto_awesome, size: 16, color: accent),
+                  const SizedBox(width: 12),
+                  Text("EVA is thinking...", style: TextStyle(color: widget.palette.textSecondary, fontStyle: FontStyle.italic, fontSize: 13)),
+                ],
+              ),
+            ),
           ),
-        Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: widget.palette.cardBg,
-            border: Border(top: BorderSide(color: widget.palette.cardBorder)),
-          ),
-          child: Row(
+        Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 800),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            decoration: BoxDecoration(
+              color: widget.palette.cardBg,
+              border: Border(top: BorderSide(color: widget.palette.cardBorder)),
+            ),
+            child: Row(
             children: [
               Expanded(
                 child: TextField(
@@ -955,6 +1126,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
               ),
             ],
           ),
+        ),
         ),
       ],
     );

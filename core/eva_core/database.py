@@ -47,6 +47,7 @@ def init_db():
                 sequence INTEGER NOT NULL,
                 description TEXT NOT NULL,
                 dependencies TEXT,
+                action TEXT,
                 status TEXT NOT NULL,
                 result TEXT,
                 error TEXT,
@@ -55,6 +56,34 @@ def init_db():
                 FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
             )
         ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversations (
+                conversation_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                message_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations (conversation_id) ON DELETE CASCADE
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_conv_msg_conv_id ON conversation_messages(conversation_id)
+        ''')
+        
+        try:
+            cursor.execute("ALTER TABLE task_steps ADD COLUMN action TEXT")
+        except sqlite3.OperationalError:
+            pass
         
         conn.commit()
         conn.close()

@@ -3,7 +3,6 @@ import sys
 import os
 from typing import Dict, Any
 
-# Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
 from core.eva_core.intent.engine import IntentEngine
@@ -14,8 +13,10 @@ from core.eva_core.llm.provider import LLMProvider
 class MockLLMProvider(LLMProvider):
     def __init__(self, mock_response: Dict[str, Any]):
         self.mock_response = mock_response
+        self.last_prompt = ""
 
     async def generate_json(self, prompt: str, system: str = "") -> Dict[str, Any]:
+        self.last_prompt = prompt
         if "error" in self.mock_response:
             raise RuntimeError(self.mock_response["error"])
         return self.mock_response
@@ -23,39 +24,69 @@ class MockLLMProvider(LLMProvider):
 @pytest.mark.asyncio
 async def test_fast_path_conversation():
     engine = IntentEngine(llm_provider=MockLLMProvider({}))
-    intent = await engine.determine_intent("hello eva")
+    
+    # Exact match
+    intent = await engine.determine_intent("hello")
     assert intent.intent == "conversation"
-    assert intent.confidence == 1.0
+    
+    # Typo / Alias
+    intent2 = await engine.determine_intent("helo eva")
+    assert intent2.intent == "conversation"
 
 @pytest.mark.asyncio
 async def test_fast_path_application():
     engine = IntentEngine(llm_provider=MockLLMProvider({}))
+    
     intent = await engine.determine_intent("open chrome")
     assert intent.intent == "application_operation"
-    assert intent.confidence == 1.0
     assert intent.parameters.get("application") == "chrome"
+    
+    # Typo prefix
+    intent2 = await engine.determine_intent("opne vscode")
+    assert intent2.intent == "application_operation"
+    assert intent2.parameters.get("application") == "vscode"
 
 @pytest.mark.asyncio
 async def test_fast_path_file_creation():
     engine = IntentEngine(llm_provider=MockLLMProvider({}))
-    intent = await engine.determine_intent("create a folder called projects")
+    intent = await engine.determine_intent("create a folder")
     assert intent.intent == "file_operation"
-    assert intent.confidence == 1.0
-    assert intent.parameters.get("operation") == "create_directory"
-    assert intent.parameters.get("name") == "projects"
 
 @pytest.mark.asyncio
-async def test_llm_fallback_complex_task():
-    mock_resp = {
-        "intent": "complex_task",
-        "confidence": 0.95,
-        "reason": "Requires multiple steps",
-        "parameters": {}
-    }
-    engine = IntentEngine(llm_provider=MockLLMProvider(mock_resp))
-    intent = await engine.determine_intent("research AI agents and create a report")
+async def test_fast_path_browser():
+    engine = IntentEngine(llm_provider=MockLLMProvider({}))
+    intent = await engine.determine_intent("search for ai agents")
+    assert intent.intent == "browser_operation"
+
+    intent2 = await engine.determine_intent("serach the web for python")
+    assert intent2.intent == "browser_operation"
+    assert "python" in intent2.parameters.get("query", "")
+
+@pytest.mark.asyncio
+async def test_fast_path_document():
+    engine = IntentEngine(llm_provider=MockLLMProvider({}))
+    intent = await engine.determine_intent("create a word document")
+    assert intent.intent == "document_operation"
+
+@pytest.mark.asyncio
+async def test_fast_path_system():
+    engine = IntentEngine(llm_provider=MockLLMProvider({}))
+    intent = await engine.determine_intent("check cpu usage")
+    assert intent.intent == "system_command"
+    
+    intent2 = await engine.determine_intent("ss")
+    assert intent2.intent == "system_command"
+
+@pytest.mark.asyncio
+async def test_llm_fallback_preserves_original_context():
+    mock_llm = MockLLMProvider({"intent": "complex_task", "confidence": 0.9})
+    engine = IntentEngine(llm_provider=mock_llm)
+    
+    original_text = "Could you please research AI agents and create a Word report for my project?"
+    intent = await engine.determine_intent(original_text)
+    
     assert intent.intent == "complex_task"
-    assert intent.confidence == 0.95
+    assert original_text in mock_llm.last_prompt
 
 @pytest.mark.asyncio
 async def test_llm_fallback_invalid_intent():

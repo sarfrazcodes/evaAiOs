@@ -32,6 +32,7 @@ def setup_db():
             sequence INTEGER NOT NULL,
             description TEXT NOT NULL,
             dependencies TEXT,
+            action TEXT,
             status TEXT NOT NULL,
             result TEXT,
             error TEXT,

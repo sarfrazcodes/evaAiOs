@@ -20,7 +20,7 @@ class OllamaProvider(LLMProvider, PlanningProvider):
         }
         
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
                 data = response.json()
@@ -36,3 +36,29 @@ class OllamaProvider(LLMProvider, PlanningProvider):
     async def generate_plan(self, prompt: str, system: str = "") -> Dict[str, Any]:
         """Uses the exact same infrastructure for planning."""
         return await self.generate_json(prompt, system)
+
+    async def stream_text(self, prompt: str, system: str = "") -> Any:
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "system": system,
+            "stream": True
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with client.stream("POST", url, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                if "response" in data:
+                                    yield data["response"]
+                            except json.JSONDecodeError:
+                                pass
+        except httpx.RequestError as e:
+            logging.error(f"Ollama streaming connection error: {e}")
+            yield f"\n[Connection error: {e}]"
+

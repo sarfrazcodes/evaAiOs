@@ -37,6 +37,14 @@ class ResponseModel(BaseModel):
     error: Optional[ErrorModel] = None
     timestamp: datetime = Field(default_factory=utc_now)
 
+class ToolResult(BaseModel):
+    success: bool
+    tool_name: str
+    message: str
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: datetime = Field(default_factory=utc_now)
+
 class TaskStatus(str, Enum):
     CREATED = "created"
     PLANNING = "planning"
@@ -47,6 +55,8 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     REQUIRES_CLARIFICATION = "requires_clarification"
+    BLOCKED = "blocked"
+    ACTION_RESOLUTION_REQUIRED = "action_resolution_required"
 
 class TaskStep(BaseModel):
     step_id: str = Field(default_factory=generate_id)
@@ -54,6 +64,7 @@ class TaskStep(BaseModel):
     sequence: int
     description: str
     dependencies: List[str] = Field(default_factory=list)
+    action: Optional[ActionModel] = None
     status: str = "pending"
     result: Optional[Dict[str, Any]] = None
     error: Optional[ErrorModel] = None

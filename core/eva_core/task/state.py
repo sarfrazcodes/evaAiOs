@@ -51,11 +51,12 @@ class TaskStateManager:
                     sequence=s_row[2],
                     description=s_row[3],
                     dependencies=json.loads(s_row[4]) if s_row[4] else [],
-                    status=s_row[5],
-                    result=json.loads(s_row[6]) if s_row[6] else None,
-                    error=json.loads(s_row[7]) if s_row[7] else None,
-                    created_at=datetime.fromisoformat(s_row[8]),
-                    updated_at=datetime.fromisoformat(s_row[9])
+                    action=json.loads(s_row[5]) if s_row[5] else None,
+                    status=s_row[6],
+                    result=json.loads(s_row[7]) if s_row[7] else None,
+                    error=json.loads(s_row[8]) if s_row[8] else None,
+                    created_at=datetime.fromisoformat(s_row[9]),
+                    updated_at=datetime.fromisoformat(s_row[10])
                 )
                 task.steps.append(step)
             return task
@@ -71,9 +72,9 @@ class TaskStateManager:
             cursor = conn.cursor()
             for step in steps:
                 cursor.execute('''
-                    INSERT INTO task_steps (step_id, task_id, sequence, description, dependencies, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (step.step_id, step.task_id, step.sequence, step.description, json.dumps(step.dependencies), step.status, step.created_at.isoformat(), step.updated_at.isoformat()))
+                    INSERT INTO task_steps (step_id, task_id, sequence, description, dependencies, action, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (step.step_id, step.task_id, step.sequence, step.description, json.dumps(step.dependencies), json.dumps(step.action.model_dump()) if step.action else None, step.status, step.created_at.isoformat(), step.updated_at.isoformat()))
             
             total_steps = len(steps)
             cursor.execute('''
@@ -92,10 +93,12 @@ class TaskStateManager:
         valid_transitions = {
             TaskStatus.CREATED: [TaskStatus.PLANNING, TaskStatus.CANCELLED],
             TaskStatus.PLANNING: [TaskStatus.PLANNED, TaskStatus.REQUIRES_CLARIFICATION, TaskStatus.FAILED, TaskStatus.CANCELLED],
-            TaskStatus.PLANNED: [TaskStatus.READY, TaskStatus.CANCELLED],
+            TaskStatus.PLANNED: [TaskStatus.READY, TaskStatus.CANCELLED, TaskStatus.ACTION_RESOLUTION_REQUIRED],
             TaskStatus.READY: [TaskStatus.RUNNING, TaskStatus.CANCELLED],
-            TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED],
+            TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.ACTION_RESOLUTION_REQUIRED],
             TaskStatus.REQUIRES_CLARIFICATION: [TaskStatus.CANCELLED],
+            TaskStatus.ACTION_RESOLUTION_REQUIRED: [TaskStatus.CANCELLED],
+            TaskStatus.BLOCKED: [TaskStatus.CANCELLED],
             TaskStatus.FAILED: [],
             TaskStatus.COMPLETED: [],
             TaskStatus.CANCELLED: []
@@ -116,3 +119,25 @@ class TaskStateManager:
 
     def cancel_task(self, task_id: str) -> TaskModel:
         return self.transition_task(task_id, TaskStatus.CANCELLED)
+
+    def update_step(self, step_id: str, status: Optional[str] = None, result: Optional[dict] = None, error: Optional[dict] = None) -> None:
+        now = utc_now().isoformat()
+        updates = ["updated_at = ?"]
+        params = [now]
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if result is not None:
+            updates.append("result = ?")
+            params.append(json.dumps(result))
+        if error is not None:
+            updates.append("error = ?")
+            params.append(json.dumps(error))
+            
+        params.append(step_id)
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = f"UPDATE task_steps SET {', '.join(updates)} WHERE step_id = ?"
+            cursor.execute(query, tuple(params))
+            conn.commit()
