@@ -48,3 +48,29 @@ To verify the backend system integrations:
 source venv/bin/activate
 pytest tests/test_backend.py
 ```
+
+## Phase 3C local speech
+
+Piper is optional: text chat remains functional when it is not installed or
+when no audio device is available. Install it inside the virtual environment:
+
+```bash
+pip install piper-tts
+```
+
+Download the exact `en_US-amy-medium` Piper model manually from the official
+Piper voice catalogue, check that model's license before redistribution, and
+set its ONNX path. No model is downloaded during EVA startup.
+
+```bash
+export EVA_TTS_ENABLED=true
+export EVA_TTS_ENGINE=piper
+export EVA_TTS_VOICE=en_US-amy-medium
+export EVA_TTS_LANGUAGE=en
+export EVA_TTS_SPEED=1.0
+export EVA_TTS_MODEL_PATH="$HOME/.local/share/piper/models/en_US-amy-medium.onnx"
+```
+
+Linux playback uses `ffplay` when available and falls back to `aplay`.
+Install one of them if required. The UI can disable speech per request and
+stop active or queued speech through the TTS controls.

@@ -92,6 +92,20 @@ class IntentMatcher:
                     parameters={"query": rest}
                 )
 
+        # Common informational questions should stream immediately instead of
+        # requiring a second local LLM call just to choose the information route.
+        informational_prefixes = (
+            "tell me", "tell all", "explain", "what is", "what are",
+            "who is", "why is", "why are", "how do i", "how can i",
+        )
+        if text.startswith(informational_prefixes):
+            return IntentModel(
+                intent="information_request",
+                confidence=0.9,
+                reason="Informational question heuristic",
+                parameters={},
+            )
+
         # Conversational fallback heuristic
         # If the input is long and doesn't start with action words, it's highly likely to be a conversation.
         action_verbs = {

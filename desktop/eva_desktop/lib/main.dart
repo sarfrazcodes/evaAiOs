@@ -434,10 +434,6 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   bool    _isLoading = false;
   String? _sessionId;
 
-  // ── Typewriter ────────────────────────────────────────────────────────────
-  Timer?         _typewriter;
-  final List<String> _pending = [];
-
   // ── Conversation history panel ────────────────────────────────────────────
   bool               _historyOpen = true;
   List<_ConvSummary> _conversations = [];
@@ -448,47 +444,31 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   String?   _micError;
   String?   _recordingId; // active backend recording ID
 
+  // ── Local TTS state ──────────────────────────────────────────────────────
+  bool _ttsEnabled = true;
+  bool _ttsSpeaking = false;
+  String? _ttsError;
+  Timer? _ttsStatusTimer;
+
   @override
   void initState() {
     super.initState();
     _loadConversationHistory();
+    _startTtsStatusPolling();
   }
 
   @override
   void dispose() {
-    _typewriter?.cancel();
+    _ttsStatusTimer?.cancel();
     // Cancel any active backend recording on dispose
     if (_recordingId != null) {
       http.post(
         Uri.parse('http://127.0.0.1:8000/api/v1/stt/record/cancel?recording_id=$_recordingId'),
-      ).catchError((_) {});
+      ).then<void>((_) {}, onError: (_) {});
     }
     _input.dispose();
     _scroll.dispose();
     super.dispose();
-  }
-
-  // ── Typewriter ────────────────────────────────────────────────────────────
-
-  void _startTypewriter() {
-    if (_typewriter != null && _typewriter!.isActive) return;
-    _typewriter = Timer.periodic(const Duration(milliseconds: 12), (t) {
-      if (_pending.isEmpty) { t.cancel(); return; }
-      setState(() {
-        if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
-          // Drain faster when buffer is large — keeps up with fast LLM
-          final batch = _pending.length > 40 ? 5 : 1;
-          for (var i = 0; i < batch && _pending.isNotEmpty; i++) {
-            _messages.last['text'] += _pending.removeAt(0);
-          }
-        } else {
-          _pending.clear();
-        }
-      });
-      if (_scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
-      }
-    });
   }
 
   // ── Scroll ────────────────────────────────────────────────────────────────
@@ -532,7 +512,6 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
         setState(() {
           _sessionId = conv.id;
           _messages.clear();
-          _pending.clear();
           for (final m in msgs) {
             final role = m['role'] as String;
             _messages.add({
@@ -592,9 +571,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
     setState(() {
       _sessionId = null;
       _messages.clear();
-      _pending.clear();
     });
-    _typewriter?.cancel();
   }
 
   // ── Send Message ──────────────────────────────────────────────────────────
@@ -621,6 +598,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
         'source': 'desktop',
         'input_type': 'text',
         'content': text,
+        'metadata': {'tts_enabled': _ttsEnabled},
       };
       if (_sessionId != null) body['session_id'] = _sessionId;
       request.body = json.encode(body);
@@ -629,8 +607,12 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
 
       if (streamed.statusCode == 200) {
         bool firstMeta = false;
+        var lineBuffer = '';
         await for (final chunk in streamed.stream.transform(utf8.decoder)) {
-          for (final line in chunk.split('\n')) {
+          lineBuffer += chunk;
+          final lines = lineBuffer.split('\n');
+          lineBuffer = lines.removeLast();
+          for (final line in lines) {
             if (line.trim().isEmpty) continue;
             try {
               final data = json.decode(line) as Map<String, dynamic>;
@@ -638,6 +620,12 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
               if (data['type'] == 'metadata') firstMeta = true;
             } catch (_) {}
           }
+        }
+        if (lineBuffer.trim().isNotEmpty) {
+          try {
+            final data = json.decode(lineBuffer) as Map<String, dynamic>;
+            _handleStreamEvent(data, firstMeta);
+          } catch (_) {}
         }
         // Refresh history list after a successful message
         await _loadConversationHistory();
@@ -677,12 +665,17 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
         break;
 
       case 'token':
-        setState(() => _isLoading = false);
         final content = (data['content'] as String?) ?? '';
-        for (final ch in content.runes) {
-          _pending.add(String.fromCharCode(ch));
+        if (content.isEmpty) break;
+        setState(() {
+          _isLoading = false;
+          if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
+            _messages.last['text'] += content;
+          }
+        });
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
         }
-        _startTypewriter();
         break;
 
       case 'task_update':
@@ -695,6 +688,10 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
 
       case 'done':
         setState(() => _isLoading = false);
+        break;
+
+      case 'error':
+        _addSystemError((data['message'] as String?) ?? 'Response generation failed.');
         break;
     }
   }
@@ -711,6 +708,39 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  void _startTtsStatusPolling() {
+    _ttsStatusTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) async {
+      try {
+        final resp = await http.get(Uri.parse('http://127.0.0.1:8000/api/v1/tts/status'));
+        if (resp.statusCode == 200 && mounted) {
+          final data = json.decode(resp.body) as Map<String, dynamic>;
+          setState(() {
+            _ttsSpeaking = data['speaking'] == true;
+            _ttsError = data['error'] as String?;
+          });
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _toggleTts() {
+    setState(() => _ttsEnabled = !_ttsEnabled);
+    if (_ttsEnabled) {
+      _startTtsStatusPolling();
+    } else {
+      _stopSpeech();
+    }
+  }
+
+  Future<void> _stopSpeech() async {
+    try {
+      await http.post(Uri.parse('http://127.0.0.1:8000/api/v1/tts/stop'));
+    } catch (_) {
+      _showError('Could not stop speech.');
+    }
+    if (mounted) setState(() => _ttsSpeaking = false);
   }
 
   // ── Microphone / STT ─────────────────────────────────────────────────────
@@ -834,6 +864,10 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                 sessionId: _sessionId,
                 historyOpen: _historyOpen,
                 onToggleHistory: () => setState(() => _historyOpen = !_historyOpen),
+                ttsEnabled: _ttsEnabled,
+                ttsSpeaking: _ttsSpeaking,
+                onToggleTts: _toggleTts,
+                onStopSpeech: _stopSpeech,
               ),
 
               // Message list
@@ -862,6 +896,12 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                   onDismiss: () => setState(() { _micState = _MicState.idle; _micError = null; }),
                 ),
 
+              if (_ttsError != null)
+                _TtsErrorBanner(
+                  message: _ttsError!,
+                  onDismiss: () => setState(() => _ttsError = null),
+                ),
+
               // Composer
               _Composer(
                 controller: _input,
@@ -873,7 +913,6 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                   setState(() {
                     _sessionId = null;
                     _messages.clear();
-                    _pending.clear();
                   });
                 },
               ),
@@ -1099,7 +1138,19 @@ class _ChatHeader extends StatelessWidget {
   final String?  sessionId;
   final bool     historyOpen;
   final VoidCallback onToggleHistory;
-  const _ChatHeader({required this.sessionId, required this.historyOpen, required this.onToggleHistory});
+  final bool ttsEnabled;
+  final bool ttsSpeaking;
+  final VoidCallback onToggleTts;
+  final VoidCallback onStopSpeech;
+  const _ChatHeader({
+    required this.sessionId,
+    required this.historyOpen,
+    required this.onToggleHistory,
+    required this.ttsEnabled,
+    required this.ttsSpeaking,
+    required this.onToggleTts,
+    required this.onStopSpeech,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1131,6 +1182,34 @@ class _ChatHeader extends StatelessWidget {
                   : 'New Conversation',
               style: const TextStyle(color: _EvaColors.textSec, fontSize: 11),
               overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (ttsSpeaking)
+            const Padding(
+              padding: EdgeInsets.only(right: 4),
+              child: Icon(Icons.volume_up_rounded, size: 15, color: _EvaColors.accent),
+            ),
+          Tooltip(
+            message: ttsEnabled ? 'Disable spoken responses' : 'Enable spoken responses',
+            child: IconButton(
+              icon: Icon(
+                ttsEnabled ? Icons.volume_up_outlined : Icons.volume_off_outlined,
+                size: 17,
+              ),
+              color: ttsEnabled ? _EvaColors.accent : _EvaColors.textSec,
+              onPressed: onToggleTts,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+            ),
+          ),
+          Tooltip(
+            message: 'Stop speech',
+            child: IconButton(
+              icon: const Icon(Icons.stop_circle_outlined, size: 17),
+              color: ttsSpeaking ? _EvaColors.error : _EvaColors.textSec.withOpacity(0.45),
+              onPressed: ttsSpeaking ? onStopSpeech : null,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
             ),
           ),
         ],
@@ -1456,6 +1535,38 @@ class _MicErrorBanner extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(child: Text(message,
             style: const TextStyle(color: _EvaColors.error, fontSize: 12))),
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 16, color: _EvaColors.error),
+            onPressed: onDismiss,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TtsErrorBanner extends StatelessWidget {
+  final String message;
+  final VoidCallback onDismiss;
+  const _TtsErrorBanner({required this.message, required this.onDismiss});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _EvaColors.error.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _EvaColors.error.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.volume_off_rounded, color: _EvaColors.error, size: 16),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message, style: const TextStyle(color: _EvaColors.error, fontSize: 12))),
           IconButton(
             icon: const Icon(Icons.close_rounded, size: 16, color: _EvaColors.error),
             onPressed: onDismiss,

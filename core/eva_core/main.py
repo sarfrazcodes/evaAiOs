@@ -36,6 +36,7 @@ from core.eva_core.stt.recorder import (
     stop_recording,
     cancel_recording,
 )
+from core.eva_core.tts.service import SentenceBuffer, get_tts_service
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -49,6 +50,7 @@ router = Router()
 planner = Planner(provider=llm_provider)
 state_manager = TaskStateManager()
 context_manager = ConversationContextManager()
+tts_service = get_tts_service()
 
 tool_registry = ToolRegistry()
 tool_registry.register(EchoTool())
@@ -176,15 +178,26 @@ async def chat_stream(req: RequestModel):
             yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
             
             assistant_response = ""
+            speak_response = req.metadata.get("tts_enabled", tts_service.enabled)
+            sentence_buffer = SentenceBuffer()
             try:
                 async for chunk in llm_provider.stream_text(formatted_context, system=eva_system_prompt):
                     assistant_response += chunk
+                    if speak_response:
+                        for sentence in sentence_buffer.add(chunk):
+                            tts_service.enqueue(sentence)
                     yield json.dumps({"type": "token", "content": chunk}) + "\n"
                 
                 if assistant_response:
                     context_manager.add_assistant_message(conversation_id, assistant_response)
+                if speak_response:
+                    final_chunk = sentence_buffer.flush()
+                    if final_chunk:
+                        tts_service.enqueue(final_chunk)
             except Exception as e:
                 logging.error(f"Stream generation failed: {e}")
+                yield json.dumps({"type": "error", "message": "Response generation failed."}) + "\n"
+                return
                 
         elif route_result.route == "planner":
             task = state_manager.create_task(request_id=req.request_id, intent=intent_model.intent)
@@ -217,6 +230,17 @@ async def chat_stream(req: RequestModel):
         yield json.dumps({"type": "done"}) + "\n"
 
     return StreamingResponse(stream_generator(), media_type="application/x-ndjson")
+
+
+@app.get("/api/v1/tts/status")
+def tts_status():
+    return tts_service.status()
+
+
+@app.post("/api/v1/tts/stop")
+def tts_stop():
+    tts_service.stop()
+    return {"stopped": True}
 
 @app.get("/api/v1/core/task/{task_id}")
 def get_task(task_id: str):
