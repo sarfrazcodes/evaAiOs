@@ -65,10 +65,11 @@ def start_recording(recording_id: str) -> str:
     if recorder_name == "arecord":
         cmd = [
             recorder,
+            "-D", "hw:0,0",      # explicitly pin to card 0 device 0 (HDA Intel PCH)
             "-f", "S16_LE",      # 16-bit signed little-endian
-            "-r", "16000",       # 16 kHz
+            "-r", "16000",       # 16 kHz (Whisper native sample rate)
             "-c", "1",           # mono
-            "-t", "wav",         # WAV output
+            "-t", "wav",         # WAV container
             wav_path,
         ]
     elif recorder_name == "parecord":

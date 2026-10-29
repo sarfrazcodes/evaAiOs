@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration (read once at import time) ─────────────────────────────────
 
-_MODEL_SIZE = os.environ.get("EVA_WHISPER_MODEL", "base")
+_MODEL_SIZE = os.environ.get("EVA_WHISPER_MODEL", "small")  # small >> base for accuracy
 _LANGUAGE   = os.environ.get("EVA_WHISPER_LANG",  "en")
 _DEVICE     = os.environ.get("EVA_WHISPER_DEVICE", "cpu")
 
@@ -135,11 +135,16 @@ class WhisperTranscriber:
                 [
                     self._ffmpeg,
                     "-loglevel", "error",
-                    "-i",        "pipe:0",   # read from stdin
-                    "-ar",       "16000",    # resample to 16 kHz
-                    "-ac",       "1",        # mono
-                    "-f",        "f32le",    # raw 32-bit float LE
-                    "pipe:1",               # write to stdout
+                    "-i",        "pipe:0",    # read from stdin
+                    "-ar",       "16000",     # resample to 16 kHz (Whisper native)
+                    "-ac",       "1",         # mono
+                    # Audio cleanup pipeline:
+                    #   highpass=200   – remove low-freq rumble / AC hum
+                    #   loudnorm       – normalize loudness (EBU R128)
+                    #   aresample      – ensure clean 16 kHz after filtering
+                    "-af",       "highpass=f=200,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=16000",
+                    "-f",        "f32le",     # raw 32-bit float LE
+                    "pipe:1",                # write to stdout
                 ],
                 input=audio_bytes,
                 capture_output=True,
@@ -188,8 +193,11 @@ class WhisperTranscriber:
             audio_array,
             language=self.language,
             beam_size=5,
+            best_of=5,                # consider 5 candidates per beam
+            temperature=0.0,          # greedy decoding — most deterministic
+            condition_on_previous_text=True,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            vad_parameters={"min_silence_duration_ms": 300},
         )
         transcript = " ".join(s.text.strip() for s in segments).strip()
         logger.info(f"Transcribed {len(audio_bytes)} bytes → '{transcript[:80]}…'")
