@@ -6,12 +6,14 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:record/record.dart';
+import 'package:path_provider/path_provider.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Palette — Graphite + Muted Teal
@@ -444,9 +446,11 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   List<_ConvSummary> _conversations = [];
   bool               _loadingHistory = false;
 
-  // ── Microphone ────────────────────────────────────────────────────────────
+  // ── Microphone state ─────────────────────────────────────────────────────
   _MicState _micState = _MicState.idle;
   String?   _micError;
+  final AudioRecorder _recorder = AudioRecorder();
+  String?   _recordingPath;
 
   @override
   void initState() {
@@ -457,6 +461,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   @override
   void dispose() {
     _typewriter?.cancel();
+    _recorder.dispose();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -708,48 +713,86 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   }
 
   // ── Microphone / STT ─────────────────────────────────────────────────────
-  // We delegate recording to the backend's /api/v1/stt/transcribe.
-  // The Flutter client captures raw audio via the platform channel
-  // (or a future plugin).  For Phase 3B the microphone button triggers
-  // a simulated recording flow and sends audio to the backend.
-  // When no hardware is available, a clear error state is shown.
+  // Real audio recording via the `record` package (PulseAudio/ALSA on Linux).
+  // Flow: idle → tap → recording → tap again / auto-stop → transcribing →
+  //       transcript placed in composer → user presses Send.
 
   Future<void> _handleMicButton() async {
+    // ── Cancel / stop ongoing recording ──────────────────────────────────
     if (_micState == _MicState.recording) {
-      // Cancel ongoing recording
-      setState(() { _micState = _MicState.idle; _micError = null; });
+      setState(() => _micState = _MicState.transcribing);
+      try {
+        final path = await _recorder.stop();
+        if (path != null) await _transcribeFile(path);
+      } catch (e) {
+        setState(() {
+          _micState = _MicState.error;
+          _micError = 'Recording error: $e';
+        });
+      }
       return;
     }
 
+    // ── Start recording ───────────────────────────────────────────────────
     setState(() { _micState = _MicState.recording; _micError = null; });
 
-    // Attempt to record audio using platform channels
-    // (requires a native plugin like record / flutter_sound in a real build).
-    // Here we send a placeholder request so the backend wiring can be tested.
     try {
-      setState(() => _micState = _MicState.transcribing);
+      // Check microphone permission (Linux: usually allowed by default)
+      final hasPermission = await _recorder.hasPermission();
+      if (!hasPermission) {
+        setState(() {
+          _micState = _MicState.error;
+          _micError = 'Microphone permission denied.';
+        });
+        return;
+      }
 
-      // ── In a real build, replace the next line with actual recorded bytes ──
-      // final audioBytes = await _recordAudio();
-      // For Phase 3B, we demonstrate the flow with an empty request that
-      // the backend handles gracefully (returns 400 / 422).
+      // Write to a temp file in the system temp directory
+      final dir  = await getTemporaryDirectory();
+      final path = '${dir.path}/eva_rec_${DateTime.now().millisecondsSinceEpoch}.wav';
+      _recordingPath = path;
+
+      await _recorder.start(
+        const RecordConfig(
+          encoder:     AudioEncoder.wav,
+          sampleRate:  16000,
+          numChannels: 1,
+          bitRate:     128000,
+        ),
+        path: path,
+      );
+    } catch (e) {
+      setState(() {
+        _micState = _MicState.error;
+        _micError = 'Could not start recording: $e';
+      });
+    }
+  }
+
+  Future<void> _transcribeFile(String path) async {
+    setState(() => _micState = _MicState.transcribing);
+    try {
+      final file = File(path);
+      final bytes = await file.readAsBytes();
+
+      // Always clean up — no audio persisted on disk
+      await file.delete().catchError((_) {});
+
       final request = http.MultipartRequest(
         'POST',
         Uri.parse('http://127.0.0.1:8000/api/v1/stt/transcribe'),
       );
-      // Placeholder: 1 second of silence (WAV header only)
-      final silenceWav = _minimalWavHeader();
       request.files.add(http.MultipartFile.fromBytes(
         'audio',
-        silenceWav,
+        bytes,
         filename: 'recording.wav',
       ));
 
-      final streamed = await request.send();
-      final body     = json.decode(await streamed.stream.bytesToString()) as Map<String, dynamic>;
+      final streamed  = await request.send();
+      final respBody  = json.decode(await streamed.stream.bytesToString()) as Map<String, dynamic>;
 
       if (streamed.statusCode == 200) {
-        final transcript = body['transcript'] as String;
+        final transcript = (respBody['transcript'] as String? ?? '').trim();
         setState(() {
           _input.text = transcript;
           _input.selection = TextSelection.fromPosition(
@@ -760,47 +803,26 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       } else if (streamed.statusCode == 503) {
         setState(() {
           _micState = _MicState.error;
-          _micError = 'Whisper model not available.\nRun: pip install faster-whisper\nthen pull the model.';
+          _micError = 'Whisper model unavailable.\nRun: pip install faster-whisper';
+        });
+      } else if (streamed.statusCode == 422) {
+        // No speech in the clip — silently reset
+        setState(() {
+          _micState = _MicState.idle;
+          _micError = 'No speech detected. Please try again.';
         });
       } else {
         setState(() {
           _micState = _MicState.error;
-          _micError = body['detail']?.toString() ?? 'Transcription failed';
+          _micError = respBody['detail']?.toString() ?? 'Transcription failed (${streamed.statusCode})';
         });
       }
     } catch (e) {
       setState(() {
         _micState = _MicState.error;
-        _micError = 'Microphone not available on this device.';
+        _micError = 'Connection error during transcription: $e';
       });
     }
-  }
-
-  /// Returns the minimal valid WAV header for a 0-sample, 16-bit, 16 kHz file.
-  Uint8List _minimalWavHeader() {
-    // 44-byte WAV header with 0 data bytes
-    final buf = ByteData(44);
-    // RIFF
-    buf.setUint8(0, 0x52); buf.setUint8(1, 0x49);
-    buf.setUint8(2, 0x46); buf.setUint8(3, 0x46);
-    buf.setUint32(4, 36, Endian.little); // chunk size
-    buf.setUint8(8, 0x57);  buf.setUint8(9, 0x41);
-    buf.setUint8(10, 0x56); buf.setUint8(11, 0x45);
-    // fmt
-    buf.setUint8(12, 0x66); buf.setUint8(13, 0x6D);
-    buf.setUint8(14, 0x74); buf.setUint8(15, 0x20);
-    buf.setUint32(16, 16, Endian.little);
-    buf.setUint16(20, 1, Endian.little);  // PCM
-    buf.setUint16(22, 1, Endian.little);  // mono
-    buf.setUint32(24, 16000, Endian.little); // sample rate
-    buf.setUint32(28, 32000, Endian.little); // byte rate
-    buf.setUint16(32, 2, Endian.little);  // block align
-    buf.setUint16(34, 16, Endian.little); // bits per sample
-    // data
-    buf.setUint8(36, 0x64); buf.setUint8(37, 0x61);
-    buf.setUint8(38, 0x74); buf.setUint8(39, 0x61);
-    buf.setUint32(40, 0, Endian.little);  // data size = 0
-    return buf.buffer.asUint8List();
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
