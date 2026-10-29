@@ -443,6 +443,8 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   _MicState _micState   = _MicState.idle;
   String?   _micError;
   String?   _recordingId; // active backend recording ID
+  Timer? _silencePoller;
+  bool _voiceConversationMode = false;
 
   // ── Local TTS state ──────────────────────────────────────────────────────
   bool _ttsEnabled = true;
@@ -460,6 +462,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   @override
   void dispose() {
     _ttsStatusTimer?.cancel();
+    _silencePoller?.cancel();
     // Cancel any active backend recording on dispose
     if (_recordingId != null) {
       http.post(
@@ -659,7 +662,6 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
               'route':      d['route'],
               'task':       d['task'],
             });
-            _isLoading = false;
           });
         }
         break;
@@ -668,7 +670,6 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
         final content = (data['content'] as String?) ?? '';
         if (content.isEmpty) break;
         setState(() {
-          _isLoading = false;
           if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
             _messages.last['text'] += content;
           }
@@ -766,6 +767,7 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       if (resp.statusCode == 200) {
         final data = json.decode(resp.body) as Map<String, dynamic>;
         _recordingId = data['recording_id'] as String;
+        _startSilencePolling(_recordingId!);
       } else if (resp.statusCode == 503) {
         final detail = (json.decode(resp.body) as Map<String, dynamic>)['detail'] ?? '';
         setState(() {
@@ -789,7 +791,30 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
     }
   }
 
+  void _startSilencePolling(String recordingId) {
+    _silencePoller?.cancel();
+    _silencePoller = Timer.periodic(const Duration(milliseconds: 300), (_) async {
+      if (!mounted || _micState != _MicState.recording || _recordingId != recordingId) return;
+      try {
+        final resp = await http.get(Uri.parse(
+          'http://127.0.0.1:8000/api/v1/stt/record/status?recording_id=$recordingId',
+        ));
+        if (resp.statusCode == 200) {
+          final data = json.decode(resp.body) as Map<String, dynamic>;
+          if (data['silence_detected'] == true && _recordingId == recordingId) {
+            _silencePoller?.cancel();
+            setState(() => _micState = _MicState.transcribing);
+            await _stopAndTranscribe(recordingId);
+          }
+        }
+      } catch (_) {
+        // Manual mic stop remains available if status polling is unavailable.
+      }
+    });
+  }
+
   Future<void> _stopAndTranscribe(String recordingId) async {
+    _silencePoller?.cancel();
     try {
       final resp = await http.post(
         Uri.parse(
@@ -808,6 +833,9 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
           );
           _micState = _MicState.idle;
         });
+        if (_voiceConversationMode && transcript.isNotEmpty) {
+          await _sendMessage();
+        }
       } else if (resp.statusCode == 422) {
         setState(() {
           _micState = _MicState.idle;
@@ -863,11 +891,18 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
               _ChatHeader(
                 sessionId: _sessionId,
                 historyOpen: _historyOpen,
+                micState: _micState,
+                isLoading: _isLoading,
+                ttsError: _ttsError,
                 onToggleHistory: () => setState(() => _historyOpen = !_historyOpen),
                 ttsEnabled: _ttsEnabled,
                 ttsSpeaking: _ttsSpeaking,
                 onToggleTts: _toggleTts,
                 onStopSpeech: _stopSpeech,
+                voiceConversationMode: _voiceConversationMode,
+                onToggleVoiceConversation: () => setState(
+                  () => _voiceConversationMode = !_voiceConversationMode,
+                ),
               ),
 
               // Message list
@@ -1137,20 +1172,55 @@ class _HistoryItemState extends State<_HistoryItem> {
 class _ChatHeader extends StatelessWidget {
   final String?  sessionId;
   final bool     historyOpen;
+  final _MicState micState;
+  final bool isLoading;
+  final String? ttsError;
   final VoidCallback onToggleHistory;
   final bool ttsEnabled;
   final bool ttsSpeaking;
   final VoidCallback onToggleTts;
   final VoidCallback onStopSpeech;
+  final bool voiceConversationMode;
+  final VoidCallback onToggleVoiceConversation;
   const _ChatHeader({
     required this.sessionId,
     required this.historyOpen,
+    required this.micState,
+    required this.isLoading,
+    required this.ttsError,
     required this.onToggleHistory,
     required this.ttsEnabled,
     required this.ttsSpeaking,
     required this.onToggleTts,
     required this.onStopSpeech,
+    required this.voiceConversationMode,
+    required this.onToggleVoiceConversation,
   });
+
+  String get _statusLabel {
+    if (micState == _MicState.recording) return 'Listening';
+    if (micState == _MicState.transcribing) return 'Transcribing';
+    if (micState == _MicState.error) return 'Mic error';
+    if (isLoading) return 'Thinking';
+    if (ttsError != null) return 'Audio error';
+    if (ttsSpeaking) return 'Speaking';
+    return 'Ready';
+  }
+
+  IconData get _statusIcon {
+    if (micState == _MicState.recording) return Icons.mic_rounded;
+    if (micState == _MicState.transcribing) return Icons.graphic_eq_rounded;
+    if (micState == _MicState.error || ttsError != null) return Icons.warning_amber_rounded;
+    if (isLoading) return Icons.psychology_rounded;
+    if (ttsSpeaking) return Icons.volume_up_rounded;
+    return Icons.check_circle_outline_rounded;
+  }
+
+  Color get _statusColor {
+    if (micState == _MicState.error || ttsError != null) return _EvaColors.error;
+    if (micState == _MicState.recording || isLoading || ttsSpeaking) return _EvaColors.accent;
+    return _EvaColors.textSec;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1175,6 +1245,26 @@ class _ChatHeader extends StatelessWidget {
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
           const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: _statusColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: _statusColor.withOpacity(0.3)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(_statusIcon, size: 13, color: _statusColor),
+                const SizedBox(width: 5),
+                Text(
+                  _statusLabel,
+                  style: TextStyle(color: _statusColor, fontSize: 10, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               sessionId != null
@@ -1189,6 +1279,23 @@ class _ChatHeader extends StatelessWidget {
               padding: EdgeInsets.only(right: 4),
               child: Icon(Icons.volume_up_rounded, size: 15, color: _EvaColors.accent),
             ),
+          Tooltip(
+            message: voiceConversationMode
+                ? 'Voice conversation on: transcript sends automatically'
+                : 'Voice conversation off: review transcript before sending',
+            child: IconButton(
+              icon: Icon(
+                voiceConversationMode
+                    ? Icons.record_voice_over_rounded
+                    : Icons.keyboard_voice_outlined,
+                size: 17,
+              ),
+              color: voiceConversationMode ? _EvaColors.accent : _EvaColors.textSec,
+              onPressed: onToggleVoiceConversation,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+            ),
+          ),
           Tooltip(
             message: ttsEnabled ? 'Disable spoken responses' : 'Enable spoken responses',
             child: IconButton(

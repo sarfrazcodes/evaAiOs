@@ -35,6 +35,7 @@ from core.eva_core.stt.recorder import (
     start_recording,
     stop_recording,
     cancel_recording,
+    recording_status,
 )
 from core.eva_core.tts.service import SentenceBuffer, get_tts_service
 
@@ -180,12 +181,14 @@ async def chat_stream(req: RequestModel):
             assistant_response = ""
             speak_response = req.metadata.get("tts_enabled", tts_service.enabled)
             sentence_buffer = SentenceBuffer()
+            if speak_response:
+                tts_service.begin_response(req.request_id)
             try:
                 async for chunk in llm_provider.stream_text(formatted_context, system=eva_system_prompt):
                     assistant_response += chunk
                     if speak_response:
                         for sentence in sentence_buffer.add(chunk):
-                            tts_service.enqueue(sentence)
+                            tts_service.enqueue(sentence, req.request_id)
                     yield json.dumps({"type": "token", "content": chunk}) + "\n"
                 
                 if assistant_response:
@@ -193,7 +196,7 @@ async def chat_stream(req: RequestModel):
                 if speak_response:
                     final_chunk = sentence_buffer.flush()
                     if final_chunk:
-                        tts_service.enqueue(final_chunk)
+                        tts_service.enqueue(final_chunk, req.request_id)
             except Exception as e:
                 logging.error(f"Stream generation failed: {e}")
                 yield json.dumps({"type": "error", "message": "Response generation failed."}) + "\n"
@@ -506,6 +509,14 @@ def stt_record_stop(recording_id: str):
         raise HTTPException(status_code=422, detail="No speech detected in recording")
 
     return {"transcript": transcript}
+
+
+@app.get("/api/v1/stt/record/status")
+def stt_record_status(recording_id: str):
+    status = recording_status(recording_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Recording not found or already stopped")
+    return status
 
 
 @app.post("/api/v1/stt/record/cancel")

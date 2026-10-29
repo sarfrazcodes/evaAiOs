@@ -73,13 +73,14 @@ class TTSService:
         default_model = Path.home() / ".local" / "share" / "piper" / "models" / f"{self.voice}.onnx"
         self.model_path = Path(os.environ.get("EVA_TTS_MODEL_PATH", str(default_model))).expanduser()
         self._voice = None
-        self._queue: queue.Queue[Optional[str]] = queue.Queue()
+        self._queue: queue.Queue[Optional[tuple[str, Optional[str]]]] = queue.Queue()
         self._worker: Optional[threading.Thread] = None
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._speaking = False
         self.last_error: Optional[str] = None
         self._initialization_failed = False
+        self._active_response_id: Optional[str] = None
 
     def initialize(self) -> None:
         if (not self.enabled or self.engine != "piper" or self._voice is not None
@@ -96,22 +97,30 @@ class TTSService:
             raise RuntimeError("Piper TTS is not installed. Run: pip install piper-tts") from exc
         self._voice = PiperVoice.load(str(self.model_path))
 
-    def enqueue(self, text: str) -> None:
+    def begin_response(self, response_id: str) -> None:
+        """Stop and discard speech belonging to an older response."""
+        self.stop()
+        self._active_response_id = response_id
+
+    def enqueue(self, text: str, response_id: Optional[str] = None) -> None:
         if self.enabled and text.strip():
-            self._queue.put(text.strip())
+            self._queue.put((text.strip(), response_id))
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._run, name="eva-tts", daemon=True)
                 self._worker.start()
 
     def _run(self) -> None:
         while True:
-            text = self._queue.get()
-            if text is None:
+            item = self._queue.get()
+            if item is None:
                 self._queue.task_done()
                 return
+            text, response_id = item
             try:
                 self.initialize()
                 if self._voice is None:
+                    continue
+                if response_id is not None and response_id != self._active_response_id:
                     continue
                 self._speak(text)
                 self.last_error = None

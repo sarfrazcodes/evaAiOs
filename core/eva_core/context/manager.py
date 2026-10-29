@@ -140,6 +140,10 @@ class ConversationContextManager:
     def format_llm_context(self, conversation_id: str, current_request: str) -> str:
         """Formats the recent context to be appended/prepended before the prompt."""
         recent = self.get_recent_messages(conversation_id)
+        # The request is persisted before formatting and is appended below as
+        # the explicit current request, so do not include that same row twice.
+        if recent and recent[-1].role == "user" and recent[-1].content == current_request:
+            recent = recent[:-1]
         if not recent:
             return f"CURRENT USER REQUEST:\n\"{current_request}\""
             

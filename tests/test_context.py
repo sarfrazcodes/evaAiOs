@@ -114,6 +114,7 @@ def test_format_llm_context():
     assert "User:\nWhat is an AI agent?" in context_str
     assert "Assistant:\nAn AI agent is a system..." in context_str
     assert "CURRENT USER REQUEST:\n\"What can it do?\"" in context_str
+    assert context_str.count("User:\nWhat is an AI agent?") == 1  # Ensure the user message appears only once
 
 # Test streaming endpoint integration
 from core.eva_core.main import app

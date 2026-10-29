@@ -74,3 +74,14 @@ export EVA_TTS_MODEL_PATH="$HOME/.local/share/piper/models/en_US-amy-medium.onnx
 Linux playback uses `ffplay` when available and falls back to `aplay`.
 Install one of them if required. The UI can disable speech per request and
 stop active or queued speech through the TTS controls.
+
+Microphone recording automatically stops after sustained silence when using
+`arecord`. Tune the detector if needed:
+
+```bash
+export EVA_STT_SILENCE_RMS=450
+export EVA_STT_SILENCE_SECONDS=1.4
+export EVA_STT_SILENCE_GRACE=1.2
+```
+
+Manual mic stop remains available as a fallback.

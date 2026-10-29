@@ -25,6 +25,7 @@ import uuid
 import subprocess
 import shutil
 import threading
+import time
 from typing import Optional, Dict
 
 import numpy as np
@@ -35,6 +36,53 @@ logger = logging.getLogger(__name__)
 # Maps recording_id → { process, wav_path }
 _active_recordings: Dict[str, dict] = {}
 _lock = threading.Lock()
+
+
+def _monitor_silence(recording_id: str, wav_path: str) -> None:
+    """Stop an ALSA WAV capture after sustained low RMS audio."""
+    threshold = float(os.environ.get("EVA_STT_SILENCE_RMS", "450"))
+    silence_seconds = float(os.environ.get("EVA_STT_SILENCE_SECONDS", "1.4"))
+    grace_seconds = float(os.environ.get("EVA_STT_SILENCE_GRACE", "1.2"))
+    started = time.monotonic()
+    last_offset = 44
+    silent_since: Optional[float] = None
+
+    while True:
+        time.sleep(0.2)
+        with _lock:
+            rec = _active_recordings.get(recording_id)
+            if rec is None or rec.get("silence_detected"):
+                return
+            process = rec["process"]
+        if process.poll() is not None:
+            return
+        if time.monotonic() - started < grace_seconds:
+            continue
+        try:
+            file_size = os.path.getsize(wav_path)
+            readable = file_size - last_offset
+            if readable < 3200:
+                continue
+            readable -= readable % 2
+            with open(wav_path, "rb") as audio_file:
+                audio_file.seek(last_offset)
+                samples = np.frombuffer(audio_file.read(readable), dtype=np.int16)
+            last_offset += readable
+            rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32))))) if samples.size else 0.0
+            if rms < threshold:
+                silent_since = silent_since or time.monotonic()
+                if time.monotonic() - silent_since >= silence_seconds:
+                    with _lock:
+                        rec = _active_recordings.get(recording_id)
+                        if rec is not None:
+                            rec["silence_detected"] = True
+                    process.terminate()
+                    logger.info("Silence detected for recording [%s]", recording_id)
+                    return
+            else:
+                silent_since = None
+        except (FileNotFoundError, OSError, ValueError):
+            return
 
 
 def _find_recorder() -> Optional[str]:
@@ -112,9 +160,29 @@ def start_recording(recording_id: str) -> str:
             "process":  proc,
             "wav_path": wav_path,
             "recorder": recorder_name,
+            "silence_detected": False,
         }
 
+    if recorder_name == "arecord":
+        threading.Thread(
+            target=_monitor_silence,
+            args=(recording_id, wav_path),
+            name=f"eva-silence-{recording_id[:8]}",
+            daemon=True,
+        ).start()
+
     return wav_path
+
+
+def recording_status(recording_id: str) -> Optional[dict]:
+    with _lock:
+        rec = _active_recordings.get(recording_id)
+        if rec is None:
+            return None
+        return {
+            "recording": True,
+            "silence_detected": rec.get("silence_detected", False),
+        }
 
 
 def stop_recording(recording_id: str) -> bytes:

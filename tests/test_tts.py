@@ -83,3 +83,13 @@ def test_missing_model_failure_is_latched(monkeypatch, tmp_path):
     service._worker.join(timeout=1)
     assert service._initialization_failed is True
     assert service.status()["queued"] == 0
+
+
+def test_begin_response_clears_older_audio(monkeypatch):
+    service = TTSService()
+    service.enabled = True
+    service.begin_response("response-1")
+    service._queue.put(("old sentence.", "response-1"))
+    service.begin_response("response-2")
+    assert service.status()["queued"] == 0
+    assert service._active_response_id == "response-2"
