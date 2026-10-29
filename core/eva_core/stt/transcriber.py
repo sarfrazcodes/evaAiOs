@@ -3,8 +3,16 @@ Phase 3B — Speech-to-Text service using faster-whisper.
 
 Architecture:
   Flutter UI ──► POST /api/v1/stt/transcribe  ──► WhisperTranscriber
+                                                       └─► ffmpeg (audio → PCM)
                                                        └─► faster-whisper (local CPU)
                                                        └─► returns plain text
+
+Audio decoding strategy:
+  faster-whisper normally uses soundfile for audio decoding, but soundfile has
+  a Python 3.14 incompatibility (`open()` got unexpected kwarg `metadata_errors`).
+  We work around this by using ffmpeg subprocess to convert any input audio format
+  to raw 32-bit float PCM at 16 kHz, then passing the numpy array directly to
+  faster-whisper's transcribe() method — bypassing soundfile completely.
 
 Security contract:
   - Raw audio is NEVER persisted to disk.
@@ -23,9 +31,8 @@ Configuration (environment variables):
 
 import logging
 import os
-import io
-import tempfile
-from pathlib import Path
+import subprocess
+import shutil
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -57,6 +64,9 @@ class WhisperTranscriber:
     """
     Wraps faster-whisper for local, CPU-compatible speech recognition.
 
+    Audio decoding is handled by ffmpeg (not soundfile) to avoid the
+    Python 3.14 incompatibility in soundfile's open() call.
+
     The model is loaded only when the first transcription request arrives
     (lazy loading), so application startup is never blocked.
     """
@@ -71,9 +81,10 @@ class WhisperTranscriber:
         self.language   = language
         self.device     = device
         self._model     = None  # loaded lazily
+        self._ffmpeg    = shutil.which("ffmpeg")
         logger.info(
             f"WhisperTranscriber configured: model={model_size}, "
-            f"lang={language}, device={device}"
+            f"lang={language}, device={device}, ffmpeg={self._ffmpeg}"
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -105,6 +116,47 @@ class WhisperTranscriber:
                 f"Please download it first. Details: {exc}"
             ) from exc
 
+    def _decode_audio(self, audio_bytes: bytes) -> "numpy.ndarray":
+        """
+        Use ffmpeg to decode any audio format → mono 16 kHz float32 PCM.
+
+        This bypasses soundfile entirely, avoiding the Python 3.14
+        incompatibility where soundfile passes `metadata_errors` to open().
+        """
+        import numpy as np  # type: ignore
+
+        if not self._ffmpeg:
+            raise STTTranscriptionError(
+                "ffmpeg is not installed. Install it with: sudo apt install ffmpeg"
+            )
+
+        try:
+            result = subprocess.run(
+                [
+                    self._ffmpeg,
+                    "-loglevel", "error",
+                    "-i",        "pipe:0",   # read from stdin
+                    "-ar",       "16000",    # resample to 16 kHz
+                    "-ac",       "1",        # mono
+                    "-f",        "f32le",    # raw 32-bit float LE
+                    "pipe:1",               # write to stdout
+                ],
+                input=audio_bytes,
+                capture_output=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise STTTranscriptionError("Audio conversion timed out (>60 s)") from exc
+
+        if result.returncode != 0:
+            err = result.stderr.decode(errors="replace").strip()
+            raise STTTranscriptionError(f"ffmpeg audio conversion failed: {err}")
+
+        if not result.stdout:
+            return np.array([], dtype=np.float32)
+
+        return np.frombuffer(result.stdout, dtype=np.float32)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def transcribe_bytes(self, audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
@@ -116,7 +168,7 @@ class WhisperTranscriber:
         audio_bytes : bytes
             Raw audio data (WAV, WebM, OGG, MP3 …).
         mime_type : str
-            MIME hint used to choose the file extension for the temp file.
+            MIME hint (informational; ffmpeg auto-detects the format).
 
         Returns
         -------
@@ -125,26 +177,23 @@ class WhisperTranscriber:
         """
         self._load_model()
 
-        # Write to a temporary file — faster-whisper needs a file path
-        suffix = _mime_to_suffix(mime_type)
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+        # Decode via ffmpeg → numpy float32 array (avoids soundfile / Py 3.14 bug)
+        audio_array = self._decode_audio(audio_bytes)
 
-        try:
-            segments, _info = self._model.transcribe(
-                tmp_path,
-                language=self.language,
-                beam_size=5,
-                vad_filter=True,          # skip silence
-                vad_parameters={"min_silence_duration_ms": 500},
-            )
-            transcript = " ".join(s.text.strip() for s in segments).strip()
-            logger.info(f"Transcribed {len(audio_bytes)} bytes → '{transcript[:80]}…'")
-            return transcript
-        finally:
-            # Always clean up the temp file — no persistent audio on disk
-            Path(tmp_path).unlink(missing_ok=True)
+        if len(audio_array) == 0:
+            logger.info("Audio contained no samples after decoding — likely silence.")
+            return ""
+
+        segments, _info = self._model.transcribe(
+            audio_array,
+            language=self.language,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+        )
+        transcript = " ".join(s.text.strip() for s in segments).strip()
+        logger.info(f"Transcribed {len(audio_bytes)} bytes → '{transcript[:80]}…'")
+        return transcript
 
 
 # ── Custom exceptions ─────────────────────────────────────────────────────────
@@ -160,19 +209,3 @@ class STTModelNotAvailableError(RuntimeError):
 class STTTranscriptionError(RuntimeError):
     """Transcription failed for an unexpected reason."""
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _mime_to_suffix(mime_type: str) -> str:
-    """Map a MIME type to a file suffix for the temp file."""
-    table = {
-        "audio/wav":  ".wav",
-        "audio/wave": ".wav",
-        "audio/x-wav": ".wav",
-        "audio/webm": ".webm",
-        "audio/ogg":  ".ogg",
-        "audio/mp4":  ".mp4",
-        "audio/mpeg": ".mp3",
-        "audio/flac": ".flac",
-    }
-    return table.get(mime_type.lower().split(";")[0].strip(), ".audio")
