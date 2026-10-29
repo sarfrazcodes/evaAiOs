@@ -31,6 +31,11 @@ from core.eva_core.stt.transcriber import (
     STTModelNotAvailableError,
     STTTranscriptionError,
 )
+from core.eva_core.stt.recorder import (
+    start_recording,
+    stop_recording,
+    cancel_recording,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -406,6 +411,87 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail="No speech detected in audio")
 
     return {"transcript": transcript}
+
+
+# ── Phase 3B: Backend-driven recording (arecord/ALSA) ──────────────────────────────
+# These endpoints allow Flutter to trigger recording on the server using
+# arecord (ALSA) which is pre-installed on all Linux systems and works
+# under PipeWire via the ALSA compatibility layer. No Flutter plugin needed.
+
+import uuid as _uuid
+
+@app.post("/api/v1/stt/record/start")
+def stt_record_start():
+    """
+    Start capturing microphone audio on the server.
+    Returns a recording_id that must be passed to /stop or /cancel.
+
+    Returns:
+      { "recording_id": "<uuid>", "recorder": "arecord | parecord | sox" }
+
+    Errors:
+      503 – no recorder binary found
+      500 – unexpected error
+    """
+    recording_id = str(_uuid.uuid4())
+    try:
+        start_recording(recording_id)
+        return {"recording_id": recording_id}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logging.error(f"stt_record_start error: {exc}")
+        raise HTTPException(status_code=500, detail="Could not start recording")
+
+
+@app.post("/api/v1/stt/record/stop")
+def stt_record_stop(recording_id: str):
+    """
+    Stop the active recording, transcribe it, and return the transcript.
+
+    Query param: recording_id (string)
+
+    Returns:
+      { "transcript": "<text>" }
+
+    Errors:
+      404 – recording_id not found (already stopped / never started)
+      422 – no speech detected
+      503 – Whisper model not available
+      500 – recording or transcription error
+    """
+    try:
+        wav_bytes = stop_recording(recording_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Recording not found or already stopped")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    try:
+        transcriber = get_transcriber()
+        transcript = transcriber.transcribe_bytes(wav_bytes, "audio/wav")
+    except STTDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except STTModelNotAvailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logging.error(f"Transcription error after stop: {exc}")
+        raise HTTPException(status_code=500, detail="Transcription failed")
+
+    if not transcript:
+        raise HTTPException(status_code=422, detail="No speech detected in recording")
+
+    return {"transcript": transcript}
+
+
+@app.post("/api/v1/stt/record/cancel")
+def stt_record_cancel(recording_id: str):
+    """
+    Cancel an active recording without transcribing.
+    Safe to call even if the recording_id does not exist.
+    """
+    cancel_recording(recording_id)
+    return {"cancelled": True, "recording_id": recording_id}
 
 
 if __name__ == "__main__":

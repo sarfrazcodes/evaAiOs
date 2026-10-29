@@ -6,14 +6,11 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:record/record.dart';
-import 'package:path_provider/path_provider.dart';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Palette — Graphite + Muted Teal
@@ -447,10 +444,9 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   bool               _loadingHistory = false;
 
   // ── Microphone state ─────────────────────────────────────────────────────
-  _MicState _micState = _MicState.idle;
+  _MicState _micState   = _MicState.idle;
   String?   _micError;
-  final AudioRecorder _recorder = AudioRecorder();
-  String?   _recordingPath;
+  String?   _recordingId; // active backend recording ID
 
   @override
   void initState() {
@@ -461,7 +457,12 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   @override
   void dispose() {
     _typewriter?.cancel();
-    _recorder.dispose();
+    // Cancel any active backend recording on dispose
+    if (_recordingId != null) {
+      http.post(
+        Uri.parse('http://127.0.0.1:8000/api/v1/stt/record/cancel?recording_id=$_recordingId'),
+      ).catchError((_) {});
+    }
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -713,86 +714,63 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   }
 
   // ── Microphone / STT ─────────────────────────────────────────────────────
-  // Real audio recording via the `record` package (PulseAudio/ALSA on Linux).
-  // Flow: idle → tap → recording → tap again / auto-stop → transcribing →
-  //       transcript placed in composer → user presses Send.
+  // Backend-driven recording: Flutter calls POST /api/v1/stt/record/start,
+  // the server uses arecord (ALSA) to capture audio — no Flutter plugin needed.
+  // Flow: tap mic → /start (get recording_id) → tap mic again → /stop
+  //       → backend transcribes with Whisper → transcript fills composer.
 
   Future<void> _handleMicButton() async {
-    // ── Cancel / stop ongoing recording ──────────────────────────────────
-    if (_micState == _MicState.recording) {
+    // ── Stop an active recording ──────────────────────────────────────────
+    if (_micState == _MicState.recording && _recordingId != null) {
       setState(() => _micState = _MicState.transcribing);
-      try {
-        final path = await _recorder.stop();
-        if (path != null) await _transcribeFile(path);
-      } catch (e) {
-        setState(() {
-          _micState = _MicState.error;
-          _micError = 'Recording error: $e';
-        });
-      }
+      await _stopAndTranscribe(_recordingId!);
       return;
     }
 
-    // ── Start recording ───────────────────────────────────────────────────
+    // ── Start a new recording ───────────────────────────────────────────────
     setState(() { _micState = _MicState.recording; _micError = null; });
-
     try {
-      // Check microphone permission (Linux: usually allowed by default)
-      final hasPermission = await _recorder.hasPermission();
-      if (!hasPermission) {
+      final resp = await http.post(
+        Uri.parse('http://127.0.0.1:8000/api/v1/stt/record/start'),
+      );
+      if (resp.statusCode == 200) {
+        final data = json.decode(resp.body) as Map<String, dynamic>;
+        _recordingId = data['recording_id'] as String;
+      } else if (resp.statusCode == 503) {
+        final detail = (json.decode(resp.body) as Map<String, dynamic>)['detail'] ?? '';
         setState(() {
           _micState = _MicState.error;
-          _micError = 'Microphone permission denied.';
+          _micError = 'No microphone recorder available:\n$detail';
+          _recordingId = null;
         });
-        return;
+      } else {
+        setState(() {
+          _micState = _MicState.error;
+          _micError = 'Could not start recording (${resp.statusCode})';
+          _recordingId = null;
+        });
       }
-
-      // Write to a temp file in the system temp directory
-      final dir  = await getTemporaryDirectory();
-      final path = '${dir.path}/eva_rec_${DateTime.now().millisecondsSinceEpoch}.wav';
-      _recordingPath = path;
-
-      await _recorder.start(
-        const RecordConfig(
-          encoder:     AudioEncoder.wav,
-          sampleRate:  16000,
-          numChannels: 1,
-          bitRate:     128000,
-        ),
-        path: path,
-      );
     } catch (e) {
       setState(() {
         _micState = _MicState.error;
-        _micError = 'Could not start recording: $e';
+        _micError = 'Connection error: is EVA Core running?';
+        _recordingId = null;
       });
     }
   }
 
-  Future<void> _transcribeFile(String path) async {
-    setState(() => _micState = _MicState.transcribing);
+  Future<void> _stopAndTranscribe(String recordingId) async {
     try {
-      final file = File(path);
-      final bytes = await file.readAsBytes();
-
-      // Always clean up — no audio persisted on disk
-      await file.delete().catchError((_) {});
-
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse('http://127.0.0.1:8000/api/v1/stt/transcribe'),
+      final resp = await http.post(
+        Uri.parse(
+          'http://127.0.0.1:8000/api/v1/stt/record/stop?recording_id=$recordingId',
+        ),
       );
-      request.files.add(http.MultipartFile.fromBytes(
-        'audio',
-        bytes,
-        filename: 'recording.wav',
-      ));
+      _recordingId = null;
+      final body = json.decode(resp.body) as Map<String, dynamic>;
 
-      final streamed  = await request.send();
-      final respBody  = json.decode(await streamed.stream.bytesToString()) as Map<String, dynamic>;
-
-      if (streamed.statusCode == 200) {
-        final transcript = (respBody['transcript'] as String? ?? '').trim();
+      if (resp.statusCode == 200) {
+        final transcript = (body['transcript'] as String? ?? '').trim();
         setState(() {
           _input.text = transcript;
           _input.selection = TextSelection.fromPosition(
@@ -800,27 +778,27 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
           );
           _micState = _MicState.idle;
         });
-      } else if (streamed.statusCode == 503) {
+      } else if (resp.statusCode == 422) {
+        setState(() {
+          _micState = _MicState.idle;
+          _micError = 'No speech detected — please try again.';
+        });
+      } else if (resp.statusCode == 503) {
         setState(() {
           _micState = _MicState.error;
           _micError = 'Whisper model unavailable.\nRun: pip install faster-whisper';
         });
-      } else if (streamed.statusCode == 422) {
-        // No speech in the clip — silently reset
-        setState(() {
-          _micState = _MicState.idle;
-          _micError = 'No speech detected. Please try again.';
-        });
       } else {
         setState(() {
           _micState = _MicState.error;
-          _micError = respBody['detail']?.toString() ?? 'Transcription failed (${streamed.statusCode})';
+          _micError = body['detail']?.toString() ?? 'Transcription failed (${resp.statusCode})';
         });
       }
     } catch (e) {
+      _recordingId = null;
       setState(() {
         _micState = _MicState.error;
-        _micError = 'Connection error during transcription: $e';
+        _micError = 'Error during transcription: $e';
       });
     }
   }
