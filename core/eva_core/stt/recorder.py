@@ -65,7 +65,9 @@ def start_recording(recording_id: str) -> str:
     if recorder_name == "arecord":
         cmd = [
             recorder,
-            "-D", "hw:0,0",      # explicitly pin to card 0 device 0 (HDA Intel PCH)
+            # plughw:0,0 uses the ALSA plug layer for automatic format conversion.
+            # hw:0,0 (raw hardware) is too strict and rejects 16 kHz on many codecs.
+            "-D", "plughw:0,0",
             "-f", "S16_LE",      # 16-bit signed little-endian
             "-r", "16000",       # 16 kHz (Whisper native sample rate)
             "-c", "1",           # mono
@@ -140,6 +142,17 @@ def stop_recording(recording_id: str) -> bytes:
         proc.wait()
 
     stderr_output = (proc.stderr.read() or b"").decode(errors="replace").strip()
+    if stderr_output:
+        # arecord always prints "Recording WAVE…" and "Aborted by signal Terminated"
+        # to stderr — that is normal. Only log unexpected lines.
+        unexpected = [
+            l for l in stderr_output.splitlines()
+            if not any(ok in l for ok in (
+                "Recording WAVE", "Aborted by signal", "read error: Interrupted"
+            ))
+        ]
+        if unexpected:
+            logger.warning(f"arecord stderr [{recording_id}]: {'; '.join(unexpected)}")
 
     # Read the recorded WAV
     try:
@@ -148,7 +161,7 @@ def stop_recording(recording_id: str) -> bytes:
     except FileNotFoundError:
         raise RuntimeError(
             f"Recording file not found after stop: {wav_path}. "
-            f"Recorder stderr: {stderr_output}"
+            f"arecord stderr: {stderr_output}"
         )
     finally:
         # Always clean up temp file
@@ -159,8 +172,8 @@ def stop_recording(recording_id: str) -> bytes:
 
     if len(wav_bytes) < 44:          # WAV header is 44 bytes minimum
         raise RuntimeError(
-            f"Recording too short ({len(wav_bytes)} bytes). "
-            f"Is the microphone available? Recorder: {stderr_output}"
+            f"Recording too short ({len(wav_bytes)} bytes) — "
+            f"check microphone: {stderr_output or 'no stderr output'}"
         )
 
     logger.info(
