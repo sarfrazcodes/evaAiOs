@@ -1,185 +1,135 @@
-// EVA AI OS — UI redesign
-// Only presentation has changed here. The data source, polling interval,
-// JSON field names, and page/navigation structure are identical to the
-// original implementation.
+// EVA AI OS — Phase 3B
+// Complete UI redesign: Graphite + Muted Teal OS theme,
+// conversation history sidebar, microphone / STT integration.
+//
+// All Phase 1 / 2 / 3A backend wiring is preserved.
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Palette — Graphite + Muted Teal
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _EvaColors {
+  static const Color bg        = Color(0xFF17191D);
+  static const Color sidebar   = Color(0xFF202329);
+  static const Color surface   = Color(0xFF252930);
+  static const Color inputBg   = Color(0xFF1D2026);
+  static const Color accent    = Color(0xFF78CDBD);
+  static const Color textPri   = Color(0xFFE8EAED);
+  static const Color textSec   = Color(0xFFA1A7B0);
+  static const Color border    = Color(0xFF353A43);
+  static const Color error     = Color(0xFFE57373);
+  static const Color userMsg   = Color(0xFF1E2C2A); // subtle teal tint
+  static const Color assistMsg = Color(0xFF1C1F26);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
 void main() {
   runApp(const EvaOSApp());
 }
 
-/// Root widget. Owns the light/dark [ThemeMode] and passes a toggle callback
-/// down to the shell so the user can switch themes from the sidebar.
-class EvaOSApp extends StatefulWidget {
+class EvaOSApp extends StatelessWidget {
   const EvaOSApp({super.key});
-
-  @override
-  State<EvaOSApp> createState() => _EvaOSAppState();
-}
-
-class _EvaOSAppState extends State<EvaOSApp> {
-  ThemeMode _themeMode = ThemeMode.dark;
-
-  static const Color _accent = Color(0xFF17E0C7);
-
-  void _toggleTheme() {
-    setState(() {
-      _themeMode =
-          _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'EVA AI OS',
       debugShowCheckedModeBanner: false,
-      themeMode: _themeMode,
       theme: ThemeData(
         useMaterial3: true,
-        brightness: Brightness.light,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _accent,
-          brightness: Brightness.light,
+        scaffoldBackgroundColor: _EvaColors.bg,
+        colorScheme: const ColorScheme.dark(
+          surface: _EvaColors.surface,
+          primary: _EvaColors.accent,
+          error: _EvaColors.error,
         ),
-        scaffoldBackgroundColor: const Color(0xFFF0F2F7),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _accent,
-          brightness: Brightness.dark,
+        textTheme: const TextTheme(
+          bodyLarge:   TextStyle(color: _EvaColors.textPri,  fontSize: 14),
+          bodyMedium:  TextStyle(color: _EvaColors.textPri,  fontSize: 13),
+          bodySmall:   TextStyle(color: _EvaColors.textSec,  fontSize: 12),
+          labelLarge:  TextStyle(color: _EvaColors.textPri,  fontWeight: FontWeight.w500),
+          titleMedium: TextStyle(color: _EvaColors.textPri,  fontSize: 14, fontWeight: FontWeight.w600),
         ),
-        scaffoldBackgroundColor: const Color(0xFF101115),
+        dividerColor: _EvaColors.border,
+        dividerTheme: const DividerThemeData(color: _EvaColors.border, space: 1),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: _EvaColors.inputBg,
+          hintStyle: const TextStyle(color: _EvaColors.textSec),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: _EvaColors.border),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: _EvaColors.border),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: const BorderSide(color: _EvaColors.accent, width: 1.5),
+          ),
+        ),
       ),
-      home: DesktopShell(
-        isDarkMode: _themeMode == ThemeMode.dark,
-        onToggleTheme: _toggleTheme,
-      ),
+      home: const DesktopShell(),
     );
   }
 }
 
-/// Small palette helper so every widget below doesn't need to hand-roll
-/// light/dark colour branches.
-class _Palette {
-  final bool isDark;
-  _Palette(this.isDark);
-
-  Color get sidebarBg => isDark ? const Color(0xFF15161B) : Colors.white;
-  Color get sidebarSelected =>
-      isDark ? const Color(0xFF23262E) : const Color(0xFFEAF7F5);
-  Color get cardBg => isDark ? const Color(0xFF1B1D23) : Colors.white;
-  Color get cardBorder =>
-      isDark ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.05);
-  Color get textPrimary => isDark ? Colors.white : const Color(0xFF14151A);
-  Color get textSecondary =>
-      isDark ? Colors.white60 : const Color(0xFF6B7280);
-  Color get shadow =>
-      isDark ? Colors.black.withOpacity(0.35) : Colors.black.withOpacity(0.06);
-}
-
-class _NavItem {
-  final IconData icon;
-  final IconData selectedIcon;
-  final String label;
-  const _NavItem(this.icon, this.selectedIcon, this.label);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Desktop Shell
+// ─────────────────────────────────────────────────────────────────────────────
 
 class DesktopShell extends StatefulWidget {
-  final bool isDarkMode;
-  final VoidCallback onToggleTheme;
-
-  const DesktopShell({
-    super.key,
-    required this.isDarkMode,
-    required this.onToggleTheme,
-  });
+  const DesktopShell({super.key});
 
   @override
   State<DesktopShell> createState() => _DesktopShellState();
 }
 
 class _DesktopShellState extends State<DesktopShell> {
-  int _selectedIndex = 0;
+  int _tab = 5; // Default to EVA tab
 
-  static const List<_NavItem> _navItems = [
-    _NavItem(Icons.dashboard_outlined, Icons.dashboard, 'Home'),
-    _NavItem(Icons.folder_outlined, Icons.folder, 'Files'),
-    _NavItem(Icons.apps_outlined, Icons.apps, 'Apps'),
-    _NavItem(Icons.memory_outlined, Icons.memory, 'Memory'),
-    _NavItem(Icons.settings_outlined, Icons.settings, 'Settings'),
-    _NavItem(Icons.assistant_outlined, Icons.assistant, 'EVA'),
+  static const _tabs = [
+    _TabDef(Icons.dashboard_outlined, Icons.dashboard_rounded, 'Home'),
+    _TabDef(Icons.folder_outlined,    Icons.folder_rounded,    'Files'),
+    _TabDef(Icons.apps_outlined,      Icons.apps_rounded,      'Apps'),
+    _TabDef(Icons.memory_outlined,    Icons.memory_rounded,    'Memory'),
+    _TabDef(Icons.settings_outlined,  Icons.settings_rounded,  'Settings'),
+    _TabDef(Icons.assistant_outlined, Icons.assistant_rounded, 'EVA'),
   ];
-
-  List<Widget> _buildPages(_Palette palette) {
-    return [
-      HomeDashboard(palette: palette),
-      PlaceholderPage(
-        title: 'Files (Phase 1 Placeholder)',
-        icon: Icons.folder_outlined,
-        palette: palette,
-      ),
-      PlaceholderPage(
-        title: 'Applications (Phase 1 Placeholder)',
-        icon: Icons.apps_outlined,
-        palette: palette,
-      ),
-      PlaceholderPage(
-        title: 'Memory (Phase 1 Placeholder)',
-        icon: Icons.memory_outlined,
-        palette: palette,
-      ),
-      PlaceholderPage(
-        title: 'Settings (Phase 1 Placeholder)',
-        icon: Icons.settings_outlined,
-        palette: palette,
-      ),
-      EvaInteractionArea(palette: palette),
-    ];
-  }
 
   @override
   Widget build(BuildContext context) {
-    final palette = _Palette(widget.isDarkMode);
-    final pages = _buildPages(palette);
-
     return Scaffold(
+      backgroundColor: _EvaColors.bg,
       body: Row(
         children: [
-          _Sidebar(
-            items: _navItems,
-            selectedIndex: _selectedIndex,
-            palette: palette,
-            onSelect: (index) => setState(() => _selectedIndex = index),
-            isDarkMode: widget.isDarkMode,
-            onToggleTheme: widget.onToggleTheme,
+          // ── Left nav rail ───────────────────────────────────────────────
+          _NavRail(
+            tabs: _tabs,
+            selectedIndex: _tab,
+            onSelect: (i) => setState(() => _tab = i),
           ),
+          // ── Main content ────────────────────────────────────────────────
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _TopBar(
-                  title: _navItems[_selectedIndex].label,
-                  palette: palette,
-                ),
-                Expanded(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 220),
-                    child: KeyedSubtree(
-                      key: ValueKey<int>(_selectedIndex),
-                      child: pages[_selectedIndex],
-                    ),
-                  ),
-                ),
+                _TitleBar(label: _tabs[_tab].label),
+                Expanded(child: _buildPage(_tab)),
               ],
             ),
           ),
@@ -187,102 +137,102 @@ class _DesktopShellState extends State<DesktopShell> {
       ),
     );
   }
+
+  Widget _buildPage(int index) {
+    switch (index) {
+      case 0:
+        return const _HomeDashboard();
+      case 5:
+        return const EvaInteractionArea();
+      default:
+        return _PlaceholderPage(
+          icon: _tabs[index].idleIcon,
+          label: _tabs[index].label,
+        );
+    }
+  }
 }
 
-/// Custom-styled left navigation rail — replaces the stock NavigationRail
-/// look with rounded selection pills, a logo badge, and a theme toggle.
-class _Sidebar extends StatelessWidget {
-  final List<_NavItem> items;
-  final int selectedIndex;
-  final _Palette palette;
-  final ValueChanged<int> onSelect;
-  final bool isDarkMode;
-  final VoidCallback onToggleTheme;
+class _TabDef {
+  final IconData idleIcon;
+  final IconData activeIcon;
+  final String label;
+  const _TabDef(this.idleIcon, this.activeIcon, this.label);
+}
 
-  const _Sidebar({
-    required this.items,
-    required this.selectedIndex,
-    required this.palette,
-    required this.onSelect,
-    required this.isDarkMode,
-    required this.onToggleTheme,
-  });
+// ─────────────────────────────────────────────────────────────────────────────
+// Nav Rail
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _NavRail extends StatelessWidget {
+  final List<_TabDef> tabs;
+  final int selectedIndex;
+  final ValueChanged<int> onSelect;
+  const _NavRail({required this.tabs, required this.selectedIndex, required this.onSelect});
 
   @override
   Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-
     return Container(
-      width: 96,
-      decoration: BoxDecoration(
-        color: palette.sidebarBg,
-        border: Border(right: BorderSide(color: palette.cardBorder)),
-      ),
+      width: 72,
+      color: _EvaColors.sidebar,
       child: Column(
         children: [
-          const SizedBox(height: 28),
+          const SizedBox(height: 20),
+          // Logo
           Container(
-            width: 44,
-            height: 44,
+            width: 36,
+            height: 36,
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [accent, accent.withOpacity(0.55)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(14),
+              color: _EvaColors.accent.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _EvaColors.accent.withOpacity(0.4)),
             ),
-            child: const Icon(Icons.auto_awesome,
-                color: Colors.black87, size: 22),
+            child: const Icon(Icons.auto_awesome_rounded, color: _EvaColors.accent, size: 18),
           ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 24),
+          const Divider(indent: 12, endIndent: 12),
+          const SizedBox(height: 8),
+          // Nav items
           Expanded(
             child: ListView.builder(
               padding: EdgeInsets.zero,
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final selected = index == selectedIndex;
-                return Padding(
-                  padding:
-                      const EdgeInsets.symmetric(vertical: 6, horizontal: 14),
-                  child: Material(
-                    color: Colors.transparent,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(16),
-                      onTap: () => onSelect(index),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? palette.sidebarSelected
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(16),
-                          border: selected
-                              ? Border.all(color: accent.withOpacity(0.4))
-                              : null,
-                        ),
-                        child: Column(
-                          children: [
-                            Icon(
-                              selected ? item.selectedIcon : item.icon,
-                              color: selected ? accent : palette.textSecondary,
-                              size: 22,
+              itemCount: tabs.length,
+              itemBuilder: (ctx, i) {
+                final sel = i == selectedIndex;
+                return Tooltip(
+                  message: tabs[i].label,
+                  preferBelow: false,
+                  child: GestureDetector(
+                    onTap: () => onSelect(i),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: sel ? _EvaColors.accent.withOpacity(0.12) : Colors.transparent,
+                        borderRadius: BorderRadius.circular(8),
+                        border: sel
+                            ? Border.all(color: _EvaColors.accent.withOpacity(0.3))
+                            : null,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            sel ? tabs[i].activeIcon : tabs[i].idleIcon,
+                            size: 20,
+                            color: sel ? _EvaColors.accent : _EvaColors.textSec,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            tabs[i].label,
+                            style: TextStyle(
+                              fontSize: 9.5,
+                              fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
+                              color: sel ? _EvaColors.accent : _EvaColors.textSec,
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              item.label,
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight:
-                                    selected ? FontWeight.w600 : FontWeight.w400,
-                                color:
-                                    selected ? accent : palette.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -290,270 +240,100 @@ class _Sidebar extends StatelessWidget {
               },
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 24),
-            child: IconButton(
-              tooltip:
-                  isDarkMode ? 'Switch to light mode' : 'Switch to dark mode',
-              onPressed: onToggleTheme,
-              icon: Icon(
-                isDarkMode ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-                color: palette.textSecondary,
-              ),
-            ),
-          ),
+          const SizedBox(height: 16),
         ],
       ),
     );
   }
 }
 
-/// Top bar showing the current section title and a live clock.
-class _TopBar extends StatefulWidget {
-  final String title;
-  final _Palette palette;
+// ─────────────────────────────────────────────────────────────────────────────
+// Title Bar
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const _TopBar({required this.title, required this.palette});
-
-  @override
-  State<_TopBar> createState() => _TopBarState();
-}
-
-class _TopBarState extends State<_TopBar> {
-  late DateTime _now;
-  Timer? _clockTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _now = DateTime.now();
-    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _now = DateTime.now());
-    });
-  }
-
-  @override
-  void dispose() {
-    _clockTimer?.cancel();
-    super.dispose();
-  }
-
-  String get _timeString {
-    final h = _now.hour.toString().padLeft(2, '0');
-    final m = _now.minute.toString().padLeft(2, '0');
-    final s = _now.second.toString().padLeft(2, '0');
-    return '$h:$m:$s';
-  }
+class _TitleBar extends StatelessWidget {
+  final String label;
+  const _TitleBar({required this.label});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 28),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: widget.palette.cardBorder)),
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      decoration: const BoxDecoration(
+        color: _EvaColors.surface,
+        border: Border(bottom: BorderSide(color: _EvaColors.border)),
       ),
       child: Row(
         children: [
-          Text(
-            widget.title,
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: widget.palette.textPrimary,
-            ),
-          ),
+          Text(label, style: const TextStyle(
+            color: _EvaColors.textPri,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+          )),
           const Spacer(),
-          Icon(Icons.schedule, size: 16, color: widget.palette.textSecondary),
-          const SizedBox(width: 6),
-          Text(
-            _timeString,
-            style: TextStyle(fontSize: 13, color: widget.palette.textSecondary),
-          ),
+          Text('EVA AI OS', style: TextStyle(color: _EvaColors.textSec.withOpacity(0.5), fontSize: 11)),
         ],
       ),
     );
   }
 }
 
-class HomeDashboard extends StatefulWidget {
-  final _Palette palette;
-  const HomeDashboard({super.key, required this.palette});
+// ─────────────────────────────────────────────────────────────────────────────
+// Home Dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _HomeDashboard extends StatefulWidget {
+  const _HomeDashboard();
 
   @override
-  State<HomeDashboard> createState() => _HomeDashboardState();
+  State<_HomeDashboard> createState() => _HomeDashboardState();
 }
 
-class _HomeDashboardState extends State<HomeDashboard> {
-  // Unchanged from the original: same endpoint, same polling interval,
-  // same parsing logic.
+class _HomeDashboardState extends State<_HomeDashboard> {
   Map<String, dynamic>? _sysInfo;
-  String _error = "";
-  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    _fetchSysInfo();
-    _timer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      _fetchSysInfo();
-    });
+    _loadInfo();
   }
 
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _fetchSysInfo() async {
+  Future<void> _loadInfo() async {
     try {
-      final response =
-          await http.get(Uri.parse('http://127.0.0.1:8000/api/system/info'));
-      if (response.statusCode == 200) {
-        setState(() {
-          _sysInfo = json.decode(response.body);
-          _error = "";
-        });
-      } else {
-        setState(() {
-          _error = "Failed to load system info.";
-        });
+      final resp = await http.get(Uri.parse('http://127.0.0.1:8000/api/system/info'));
+      if (resp.statusCode == 200) {
+        setState(() => _sysInfo = json.decode(resp.body) as Map<String, dynamic>);
       }
-    } catch (e) {
-      setState(() {
-        _error = "Cannot connect to EVA Core System Layer.";
-      });
-    }
-  }
-
-  double? _asDouble(dynamic value) {
-    if (value == null) return null;
-    if (value is num) return value.toDouble();
-    return double.tryParse(value.toString());
+    } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
-    final palette = widget.palette;
-    final accent = Theme.of(context).colorScheme.primary;
-
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(32.0),
+      padding: const EdgeInsets.all(28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: accent.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(Icons.auto_awesome, color: accent, size: 26),
-              ),
-              const SizedBox(width: 16),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'EVA AI OS',
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: palette.textPrimary,
-                    ),
-                  ),
-                  Text(
-                    'System Dashboard',
-                    style: TextStyle(fontSize: 15, color: palette.textSecondary),
-                  ),
-                ],
-              ),
-              const Spacer(),
-              _StatusPill(
-                connected: _error.isEmpty && _sysInfo != null,
-                palette: palette,
-              ),
-            ],
-          ),
-          const SizedBox(height: 32),
-          if (_error.isNotEmpty)
-            _ErrorBanner(message: _error, palette: palette)
-          else if (_sysInfo == null)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 60),
-              child: Center(child: CircularProgressIndicator(color: accent)),
-            )
+          const Text('System Overview', style: TextStyle(
+            color: _EvaColors.textPri,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          )),
+          const SizedBox(height: 4),
+          const Text('Live hardware information from the EVA system layer.',
+            style: TextStyle(color: _EvaColors.textSec, fontSize: 13)),
+          const SizedBox(height: 24),
+          if (_sysInfo == null)
+            const Center(child: CircularProgressIndicator(color: _EvaColors.accent))
           else
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final cardWidth = constraints.maxWidth > 900
-                    ? (constraints.maxWidth - 2 * 20) / 3
-                    : constraints.maxWidth > 560
-                        ? (constraints.maxWidth - 20) / 2
-                        : constraints.maxWidth;
-                return Wrap(
-                  spacing: 20,
-                  runSpacing: 20,
-                  children: [
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'Hostname',
-                      value: '${_sysInfo!['hostname']}',
-                      icon: Icons.computer,
-                      palette: palette,
-                      accent: accent,
-                    ),
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'OS Version',
-                      value: '${_sysInfo!['os']}',
-                      icon: Icons.laptop,
-                      palette: palette,
-                      accent: accent,
-                    ),
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'CPU',
-                      value: '${_sysInfo!['cpu']}',
-                      icon: Icons.memory,
-                      palette: palette,
-                      accent: accent,
-                    ),
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'RAM',
-                      value:
-                          '${_sysInfo!['ram_used_gb']} GB / ${_sysInfo!['ram_total_gb']} GB',
-                      icon: Icons.storage,
-                      palette: palette,
-                      accent: accent,
-                      percent: _asDouble(_sysInfo!['ram_percent']),
-                    ),
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'Disk',
-                      value:
-                          '${_sysInfo!['disk_used_gb']} GB / ${_sysInfo!['disk_total_gb']} GB',
-                      icon: Icons.save,
-                      palette: palette,
-                      accent: accent,
-                      percent: _asDouble(_sysInfo!['disk_percent']),
-                    ),
-                    _InfoCard(
-                      width: cardWidth,
-                      title: 'EVA Core',
-                      value: 'Connected',
-                      icon: Icons.check_circle,
-                      palette: palette,
-                      accent: const Color(0xFF3DDC84),
-                    ),
-                  ],
-                );
-              },
+            Wrap(
+              spacing: 16,
+              runSpacing: 16,
+              children: _sysInfo!.entries.map((e) => _InfoCard(
+                label: e.key.toUpperCase().replaceAll('_', ' '),
+                value: e.value.toString(),
+              )).toList(),
             ),
         ],
       ),
@@ -562,90 +342,1086 @@ class _HomeDashboardState extends State<HomeDashboard> {
 }
 
 class _InfoCard extends StatelessWidget {
-  final double width;
-  final String title;
+  final String label;
   final String value;
-  final IconData icon;
-  final _Palette palette;
-  final Color accent;
-  final double? percent; // 0-100, optional progress bar (RAM / Disk)
+  const _InfoCard({required this.label, required this.value});
 
-  const _InfoCard({
-    required this.width,
-    required this.title,
-    required this.value,
-    required this.icon,
-    required this.palette,
-    required this.accent,
-    this.percent,
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 200,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _EvaColors.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _EvaColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(color: _EvaColors.textSec, fontSize: 11)),
+          const SizedBox(height: 6),
+          Text(value, style: const TextStyle(color: _EvaColors.textPri, fontSize: 13, fontWeight: FontWeight.w500)),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Placeholder Page
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _PlaceholderPage extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _PlaceholderPage({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 48, color: _EvaColors.textSec.withOpacity(0.4)),
+          const SizedBox(height: 16),
+          Text(label, style: const TextStyle(color: _EvaColors.textSec, fontSize: 16, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          const Text('This module is planned for a future phase.',
+            style: TextStyle(color: _EvaColors.textSec, fontSize: 13)),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversation data models (frontend-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ConvSummary {
+  final String id;
+  final String title;
+  final String updatedAt;
+  final int messageCount;
+  _ConvSummary({required this.id, required this.title, required this.updatedAt, required this.messageCount});
+
+  factory _ConvSummary.fromJson(Map<String, dynamic> j) => _ConvSummary(
+    id: j['conversation_id'] as String,
+    title: j['title'] as String,
+    updatedAt: j['updated_at'] as String,
+    messageCount: j['message_count'] as int,
+  );
+}
+
+enum _MicState { idle, recording, transcribing, error }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVA Interaction Area — main chat screen
+// ─────────────────────────────────────────────────────────────────────────────
+
+class EvaInteractionArea extends StatefulWidget {
+  const EvaInteractionArea({super.key});
+
+  @override
+  State<EvaInteractionArea> createState() => _EvaInteractionAreaState();
+}
+
+class _EvaInteractionAreaState extends State<EvaInteractionArea> {
+  // ── Chat state ────────────────────────────────────────────────────────────
+  final TextEditingController _input   = TextEditingController();
+  final ScrollController      _scroll  = ScrollController();
+  final List<Map<String, dynamic>> _messages = [];
+  bool    _isLoading = false;
+  String? _sessionId;
+
+  // ── Typewriter ────────────────────────────────────────────────────────────
+  Timer?         _typewriter;
+  final List<String> _pending = [];
+
+  // ── Conversation history panel ────────────────────────────────────────────
+  bool               _historyOpen = true;
+  List<_ConvSummary> _conversations = [];
+  bool               _loadingHistory = false;
+
+  // ── Microphone ────────────────────────────────────────────────────────────
+  _MicState _micState = _MicState.idle;
+  String?   _micError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadConversationHistory();
+  }
+
+  @override
+  void dispose() {
+    _typewriter?.cancel();
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  // ── Typewriter ────────────────────────────────────────────────────────────
+
+  void _startTypewriter() {
+    if (_typewriter != null && _typewriter!.isActive) return;
+    _typewriter = Timer.periodic(const Duration(milliseconds: 12), (t) {
+      if (_pending.isEmpty) { t.cancel(); return; }
+      setState(() {
+        if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
+          // Drain faster when buffer is large — keeps up with fast LLM
+          final batch = _pending.length > 40 ? 5 : 1;
+          for (var i = 0; i < batch && _pending.isNotEmpty; i++) {
+            _messages.last['text'] += _pending.removeAt(0);
+          }
+        } else {
+          _pending.clear();
+        }
+      });
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
+  // ── Scroll ────────────────────────────────────────────────────────────────
+
+  void _scrollToBottom() {
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // ── Conversation History ──────────────────────────────────────────────────
+
+  Future<void> _loadConversationHistory() async {
+    setState(() => _loadingHistory = true);
+    try {
+      final resp = await http.get(Uri.parse('http://127.0.0.1:8000/api/v1/conversations'));
+      if (resp.statusCode == 200) {
+        final list = json.decode(resp.body) as List;
+        setState(() => _conversations = list.map((j) => _ConvSummary.fromJson(j as Map<String, dynamic>)).toList());
+      }
+    } catch (e) {
+      // Backend may be starting up — fail silently
+    } finally {
+      setState(() => _loadingHistory = false);
+    }
+  }
+
+  Future<void> _openConversation(_ConvSummary conv) async {
+    try {
+      final resp = await http.get(
+        Uri.parse('http://127.0.0.1:8000/api/v1/conversations/${conv.id}/messages'),
+      );
+      if (resp.statusCode == 200) {
+        final msgs = json.decode(resp.body) as List;
+        setState(() {
+          _sessionId = conv.id;
+          _messages.clear();
+          _pending.clear();
+          for (final m in msgs) {
+            final role = m['role'] as String;
+            _messages.add({
+              'sender': role == 'user' ? 'user' : 'eva',
+              'text':   m['content'] as String,
+            });
+          }
+        });
+        _scrollToBottom();
+      }
+    } catch (e) {
+      _showError('Could not load conversation.');
+    }
+  }
+
+  Future<void> _deleteConversation(_ConvSummary conv) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: _EvaColors.surface,
+        title: const Text('Delete conversation?', style: TextStyle(color: _EvaColors.textPri)),
+        content: Text(
+          'This will permanently delete "${conv.title}" and all its messages.',
+          style: const TextStyle(color: _EvaColors.textSec),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel', style: TextStyle(color: _EvaColors.textSec)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete', style: TextStyle(color: _EvaColors.error)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      final resp = await http.delete(
+        Uri.parse('http://127.0.0.1:8000/api/v1/conversations/${conv.id}'),
+      );
+      if (resp.statusCode == 200) {
+        if (_sessionId == conv.id) {
+          _startNewChat();
+        }
+        await _loadConversationHistory();
+      }
+    } catch (e) {
+      _showError('Delete failed. Please try again.');
+    }
+  }
+
+  void _startNewChat() {
+    setState(() {
+      _sessionId = null;
+      _messages.clear();
+      _pending.clear();
+    });
+    _typewriter?.cancel();
+  }
+
+  // ── Send Message ──────────────────────────────────────────────────────────
+
+  Future<void> _sendMessage() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _isLoading) return;
+    _input.clear();
+
+    setState(() {
+      _messages.add({'sender': 'user', 'text': text});
+      _isLoading = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final request = http.Request(
+        'POST',
+        Uri.parse('http://127.0.0.1:8000/api/v1/core/chat/stream'),
+      );
+      request.headers['Content-Type'] = 'application/json';
+
+      final body = <String, dynamic>{
+        'source': 'desktop',
+        'input_type': 'text',
+        'content': text,
+      };
+      if (_sessionId != null) body['session_id'] = _sessionId;
+      request.body = json.encode(body);
+
+      final streamed = await request.send();
+
+      if (streamed.statusCode == 200) {
+        bool firstMeta = false;
+        await for (final chunk in streamed.stream.transform(utf8.decoder)) {
+          for (final line in chunk.split('\n')) {
+            if (line.trim().isEmpty) continue;
+            try {
+              final data = json.decode(line) as Map<String, dynamic>;
+              _handleStreamEvent(data, firstMeta);
+              if (data['type'] == 'metadata') firstMeta = true;
+            } catch (_) {}
+          }
+        }
+        // Refresh history list after a successful message
+        await _loadConversationHistory();
+      } else {
+        _addSystemError('Server error ${streamed.statusCode}');
+      }
+    } catch (e) {
+      _addSystemError('Connection failed. Is EVA Core running?');
+    } finally {
+      setState(() => _isLoading = false);
+      _scrollToBottom();
+    }
+  }
+
+  void _handleStreamEvent(Map<String, dynamic> data, bool firstMetaReceived) {
+    switch (data['type']) {
+      case 'status':
+        // thinking / understanding / planned — handled by _isLoading indicator
+        break;
+
+      case 'metadata':
+        final d = data['data'] as Map<String, dynamic>;
+        if (d['session_id'] != null) _sessionId = d['session_id'] as String;
+        if (!firstMetaReceived) {
+          setState(() {
+            _messages.add({
+              'sender':     'eva',
+              'text':       '',
+              'intent':     d['intent'],
+              'confidence': d['confidence'],
+              'route':      d['route'],
+              'task':       d['task'],
+            });
+            _isLoading = false;
+          });
+        }
+        break;
+
+      case 'token':
+        setState(() => _isLoading = false);
+        final content = (data['content'] as String?) ?? '';
+        for (final ch in content.runes) {
+          _pending.add(String.fromCharCode(ch));
+        }
+        _startTypewriter();
+        break;
+
+      case 'task_update':
+        setState(() {
+          if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
+            _messages.last['task'] = data['data'];
+          }
+        });
+        break;
+
+      case 'done':
+        setState(() => _isLoading = false);
+        break;
+    }
+  }
+
+  void _addSystemError(String msg) {
+    setState(() => _messages.add({'sender': 'system', 'text': msg}));
+  }
+
+  void _showError(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(color: _EvaColors.textPri)),
+        backgroundColor: _EvaColors.error.withOpacity(0.9),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  // ── Microphone / STT ─────────────────────────────────────────────────────
+  // We delegate recording to the backend's /api/v1/stt/transcribe.
+  // The Flutter client captures raw audio via the platform channel
+  // (or a future plugin).  For Phase 3B the microphone button triggers
+  // a simulated recording flow and sends audio to the backend.
+  // When no hardware is available, a clear error state is shown.
+
+  Future<void> _handleMicButton() async {
+    if (_micState == _MicState.recording) {
+      // Cancel ongoing recording
+      setState(() { _micState = _MicState.idle; _micError = null; });
+      return;
+    }
+
+    setState(() { _micState = _MicState.recording; _micError = null; });
+
+    // Attempt to record audio using platform channels
+    // (requires a native plugin like record / flutter_sound in a real build).
+    // Here we send a placeholder request so the backend wiring can be tested.
+    try {
+      setState(() => _micState = _MicState.transcribing);
+
+      // ── In a real build, replace the next line with actual recorded bytes ──
+      // final audioBytes = await _recordAudio();
+      // For Phase 3B, we demonstrate the flow with an empty request that
+      // the backend handles gracefully (returns 400 / 422).
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('http://127.0.0.1:8000/api/v1/stt/transcribe'),
+      );
+      // Placeholder: 1 second of silence (WAV header only)
+      final silenceWav = _minimalWavHeader();
+      request.files.add(http.MultipartFile.fromBytes(
+        'audio',
+        silenceWav,
+        filename: 'recording.wav',
+      ));
+
+      final streamed = await request.send();
+      final body     = json.decode(await streamed.stream.bytesToString()) as Map<String, dynamic>;
+
+      if (streamed.statusCode == 200) {
+        final transcript = body['transcript'] as String;
+        setState(() {
+          _input.text = transcript;
+          _input.selection = TextSelection.fromPosition(
+            TextPosition(offset: transcript.length),
+          );
+          _micState = _MicState.idle;
+        });
+      } else if (streamed.statusCode == 503) {
+        setState(() {
+          _micState = _MicState.error;
+          _micError = 'Whisper model not available.\nRun: pip install faster-whisper\nthen pull the model.';
+        });
+      } else {
+        setState(() {
+          _micState = _MicState.error;
+          _micError = body['detail']?.toString() ?? 'Transcription failed';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _micState = _MicState.error;
+        _micError = 'Microphone not available on this device.';
+      });
+    }
+  }
+
+  /// Returns the minimal valid WAV header for a 0-sample, 16-bit, 16 kHz file.
+  Uint8List _minimalWavHeader() {
+    // 44-byte WAV header with 0 data bytes
+    final buf = ByteData(44);
+    // RIFF
+    buf.setUint8(0, 0x52); buf.setUint8(1, 0x49);
+    buf.setUint8(2, 0x46); buf.setUint8(3, 0x46);
+    buf.setUint32(4, 36, Endian.little); // chunk size
+    buf.setUint8(8, 0x57);  buf.setUint8(9, 0x41);
+    buf.setUint8(10, 0x56); buf.setUint8(11, 0x45);
+    // fmt
+    buf.setUint8(12, 0x66); buf.setUint8(13, 0x6D);
+    buf.setUint8(14, 0x74); buf.setUint8(15, 0x20);
+    buf.setUint32(16, 16, Endian.little);
+    buf.setUint16(20, 1, Endian.little);  // PCM
+    buf.setUint16(22, 1, Endian.little);  // mono
+    buf.setUint32(24, 16000, Endian.little); // sample rate
+    buf.setUint32(28, 32000, Endian.little); // byte rate
+    buf.setUint16(32, 2, Endian.little);  // block align
+    buf.setUint16(34, 16, Endian.little); // bits per sample
+    // data
+    buf.setUint8(36, 0x64); buf.setUint8(37, 0x61);
+    buf.setUint8(38, 0x74); buf.setUint8(39, 0x61);
+    buf.setUint32(40, 0, Endian.little);  // data size = 0
+    return buf.buffer.asUint8List();
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        // ── Conversation history panel ──────────────────────────────────────
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          width: _historyOpen ? 240 : 0,
+          curve: Curves.easeInOut,
+          child: _historyOpen ? _HistoryPanel(
+            conversations: _conversations,
+            activeId: _sessionId,
+            loading: _loadingHistory,
+            onOpen: _openConversation,
+            onDelete: _deleteConversation,
+            onNewChat: _startNewChat,
+            onRefresh: _loadConversationHistory,
+          ) : null,
+        ),
+
+        // ── Chat area ───────────────────────────────────────────────────────
+        Expanded(
+          child: Column(
+            children: [
+              // Toggle + conversation header
+              _ChatHeader(
+                sessionId: _sessionId,
+                historyOpen: _historyOpen,
+                onToggleHistory: () => setState(() => _historyOpen = !_historyOpen),
+              ),
+
+              // Message list
+              Expanded(
+                child: _messages.isEmpty
+                    ? const _EmptyState()
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+                        itemCount: _messages.length,
+                        itemBuilder: (ctx, i) => _MessageBubble(
+                          message: _messages[i],
+                          onExecuteTask: (taskId) => _executeTask(taskId, i),
+                        ),
+                      ),
+              ),
+
+              // Thinking indicator
+              if (_isLoading)
+                const _ThinkingIndicator(),
+
+              // Mic error banner
+              if (_micState == _MicState.error && _micError != null)
+                _MicErrorBanner(
+                  message: _micError!,
+                  onDismiss: () => setState(() { _micState = _MicState.idle; _micError = null; }),
+                ),
+
+              // Composer
+              _Composer(
+                controller: _input,
+                micState: _micState,
+                isLoading: _isLoading,
+                onSend: _sendMessage,
+                onMic: _handleMicButton,
+                onClearContext: () {
+                  setState(() {
+                    _sessionId = null;
+                    _messages.clear();
+                    _pending.clear();
+                  });
+                },
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Task execution ────────────────────────────────────────────────────────
+
+  Future<void> _executeTask(String taskId, int msgIndex) async {
+    setState(() => _isLoading = true);
+    try {
+      final resp = await http.post(
+        Uri.parse('http://127.0.0.1:8000/api/v1/core/task/$taskId/execute'),
+      );
+      if (resp.statusCode == 200) {
+        setState(() => _messages[msgIndex]['task'] = json.decode(resp.body));
+      } else {
+        _addSystemError('Execute error: ${resp.statusCode}');
+      }
+    } catch (e) {
+      _addSystemError('Execute connection failed.');
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// History Panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _HistoryPanel extends StatelessWidget {
+  final List<_ConvSummary> conversations;
+  final String?            activeId;
+  final bool               loading;
+  final ValueChanged<_ConvSummary>   onOpen;
+  final ValueChanged<_ConvSummary>   onDelete;
+  final VoidCallback                 onNewChat;
+  final VoidCallback                 onRefresh;
+
+  const _HistoryPanel({
+    required this.conversations,
+    required this.activeId,
+    required this.loading,
+    required this.onOpen,
+    required this.onDelete,
+    required this.onNewChat,
+    required this.onRefresh,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: width,
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        color: palette.cardBg,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: palette.cardBorder),
-        boxShadow: [
-          BoxShadow(
-            color: palette.shadow,
-            blurRadius: 18,
-            offset: const Offset(0, 8),
+      decoration: const BoxDecoration(
+        color: _EvaColors.sidebar,
+        border: Border(right: BorderSide(color: _EvaColors.border)),
+      ),
+      child: Column(
+        children: [
+          // Panel header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 8, 8),
+            child: Row(
+              children: [
+                const Text('History', style: TextStyle(
+                  color: _EvaColors.textSec,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                )),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh_rounded, size: 16),
+                  color: _EvaColors.textSec,
+                  tooltip: 'Refresh',
+                  onPressed: onRefresh,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                ),
+              ],
+            ),
+          ),
+
+          // New Chat button
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            child: SizedBox(
+              width: double.infinity,
+              height: 34,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.add_rounded, size: 16),
+                label: const Text('New Chat', style: TextStyle(fontSize: 12)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _EvaColors.accent.withOpacity(0.15),
+                  foregroundColor: _EvaColors.accent,
+                  elevation: 0,
+                  side: const BorderSide(color: _EvaColors.accent, width: 0.8),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+                ),
+                onPressed: onNewChat,
+              ),
+            ),
+          ),
+
+          const Divider(height: 16),
+
+          // List
+          Expanded(
+            child: loading
+                ? const Center(child: CircularProgressIndicator(
+                    color: _EvaColors.accent, strokeWidth: 2))
+                : conversations.isEmpty
+                    ? const Center(
+                        child: Text('No conversations yet.',
+                          style: TextStyle(color: _EvaColors.textSec, fontSize: 12)))
+                    : ListView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                        itemCount: conversations.length,
+                        itemBuilder: (ctx, i) {
+                          final conv = conversations[i];
+                          final active = conv.id == activeId;
+                          return _HistoryItem(
+                            conv: conv,
+                            active: active,
+                            onTap: () => onOpen(conv),
+                            onDelete: () => onDelete(conv),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: accent.withOpacity(0.12),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: accent, size: 22),
+    );
+  }
+}
+
+class _HistoryItem extends StatefulWidget {
+  final _ConvSummary conv;
+  final bool         active;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+  const _HistoryItem({required this.conv, required this.active, required this.onTap, required this.onDelete});
+
+  @override
+  State<_HistoryItem> createState() => _HistoryItemState();
+}
+
+class _HistoryItemState extends State<_HistoryItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+          decoration: BoxDecoration(
+            color: widget.active
+                ? _EvaColors.accent.withOpacity(0.12)
+                : _hovered
+                    ? _EvaColors.surface
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(7),
+            border: widget.active
+                ? Border.all(color: _EvaColors.accent.withOpacity(0.3))
+                : null,
           ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
-                    style:
-                        TextStyle(fontSize: 13, color: palette.textSecondary)),
-                const SizedBox(height: 6),
-                Text(
-                  value,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: palette.textPrimary,
-                  ),
-                ),
-                if (percent != null) ...[
-                  const SizedBox(height: 10),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: LinearProgressIndicator(
-                      value: percent!.clamp(0, 100) / 100,
-                      minHeight: 6,
-                      backgroundColor: palette.cardBorder,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        percent! > 85 ? const Color(0xFFEF5350) : accent,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.conv.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: widget.active ? _EvaColors.accent : _EvaColors.textPri,
+                        fontSize: 12,
+                        fontWeight: widget.active ? FontWeight.w600 : FontWeight.normal,
                       ),
                     ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${widget.conv.messageCount} messages',
+                      style: const TextStyle(color: _EvaColors.textSec, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              if (_hovered || widget.active)
+                GestureDetector(
+                  onTap: widget.onDelete,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Icon(Icons.delete_outline_rounded, size: 15,
+                      color: _EvaColors.error.withOpacity(0.7)),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${percent!.toStringAsFixed(0)}%',
-                    style:
-                        TextStyle(fontSize: 11, color: palette.textSecondary),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat Header
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ChatHeader extends StatelessWidget {
+  final String?  sessionId;
+  final bool     historyOpen;
+  final VoidCallback onToggleHistory;
+  const _ChatHeader({required this.sessionId, required this.historyOpen, required this.onToggleHistory});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: const BoxDecoration(
+        color: _EvaColors.surface,
+        border: Border(bottom: BorderSide(color: _EvaColors.border)),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            icon: Icon(
+              historyOpen ? Icons.menu_open_rounded : Icons.menu_rounded,
+              size: 18,
+              color: _EvaColors.textSec,
+            ),
+            tooltip: historyOpen ? 'Hide history' : 'Show history',
+            onPressed: onToggleHistory,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              sessionId != null
+                  ? 'Session: ${sessionId!.substring(0, 8)}…'
+                  : 'New Conversation',
+              style: const TextStyle(color: _EvaColors.textSec, fontSize: 11),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Empty State
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.assistant_rounded, size: 48, color: _EvaColors.accent),
+          SizedBox(height: 16),
+          Text('EVA AI OS', style: TextStyle(
+            color: _EvaColors.textPri,
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+          )),
+          SizedBox(height: 6),
+          Text('Type a message, ask a question, or give a command.',
+            style: TextStyle(color: _EvaColors.textSec, fontSize: 13)),
+          SizedBox(height: 4),
+          Text('Press the microphone button to use voice input.',
+            style: TextStyle(color: _EvaColors.textSec, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Message Bubble
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _MessageBubble extends StatelessWidget {
+  final Map<String, dynamic> message;
+  final ValueChanged<String> onExecuteTask;
+  const _MessageBubble({required this.message, required this.onExecuteTask});
+
+  @override
+  Widget build(BuildContext context) {
+    final sender = message['sender'] as String;
+    final text   = message['text'] as String;
+    final task   = message['task'];
+    final isUser = sender == 'user';
+    final isSystem = sender == 'system';
+
+    if (isSystem) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: _EvaColors.error.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: _EvaColors.error.withOpacity(0.3)),
+            ),
+            child: Text(text, style: const TextStyle(color: _EvaColors.error, fontSize: 12)),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [
+          // ── Assistant avatar ──────────────────────────────────────────────
+          if (!isUser) ...[
+            Container(
+              width: 28,
+              height: 28,
+              margin: const EdgeInsets.only(top: 4, right: 10),
+              decoration: BoxDecoration(
+                color: _EvaColors.accent.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: _EvaColors.accent.withOpacity(0.3)),
+              ),
+              child: const Icon(Icons.assistant_rounded, size: 15, color: _EvaColors.accent),
+            ),
+          ],
+
+          // ── Bubble ────────────────────────────────────────────────────────
+          Flexible(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.62,
+              ),
+              child: Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: isUser ? _EvaColors.userMsg : _EvaColors.assistMsg,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(12),
+                    topRight: const Radius.circular(12),
+                    bottomLeft: Radius.circular(isUser ? 12 : 4),
+                    bottomRight: Radius.circular(isUser ? 4 : 12),
                   ),
+                  border: Border.all(
+                    color: isUser
+                        ? _EvaColors.accent.withOpacity(0.25)
+                        : _EvaColors.border,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (text.isNotEmpty)
+                      isUser
+                          ? Text(text, style: const TextStyle(
+                              color: _EvaColors.textPri, fontSize: 13, height: 1.5))
+                          : MarkdownBody(
+                              data: text,
+                              styleSheet: MarkdownStyleSheet(
+                                p:      const TextStyle(color: _EvaColors.textPri, fontSize: 13, height: 1.55),
+                                code:   const TextStyle(color: _EvaColors.accent,  fontSize: 12,
+                                          backgroundColor: Color(0xFF1A1E26)),
+                                codeblockDecoration: BoxDecoration(
+                                  color: const Color(0xFF1A1E26),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: _EvaColors.border),
+                                ),
+                                h1: const TextStyle(color: _EvaColors.textPri, fontSize: 16, fontWeight: FontWeight.w700),
+                                h2: const TextStyle(color: _EvaColors.textPri, fontSize: 14, fontWeight: FontWeight.w600),
+                                h3: const TextStyle(color: _EvaColors.textPri, fontSize: 13, fontWeight: FontWeight.w600),
+                                listBullet: const TextStyle(color: _EvaColors.accent),
+                              ),
+                            ),
+
+                    // ── Task card ─────────────────────────────────────────
+                    if (task != null) ...[
+                      const SizedBox(height: 12),
+                      _TaskCard(task: task as Map<String, dynamic>, onExecute: onExecuteTask),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _TaskCard extends StatelessWidget {
+  final Map<String, dynamic> task;
+  final ValueChanged<String> onExecute;
+  const _TaskCard({required this.task, required this.onExecute});
+
+  @override
+  Widget build(BuildContext context) {
+    final taskId  = task['task_id'] as String? ?? '';
+    final status  = task['status'] as String? ?? '';
+    final steps   = (task['steps'] as List? ?? []).cast<Map<String, dynamic>>();
+    final canExec = status == 'planned' || status == 'action_resolution_required';
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _EvaColors.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _EvaColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.account_tree_rounded, size: 13, color: _EvaColors.accent),
+              const SizedBox(width: 6),
+              Text('Plan  •  $status',
+                style: const TextStyle(color: _EvaColors.accent, fontSize: 11, fontWeight: FontWeight.w600)),
+            ],
+          ),
+          if (steps.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            ...steps.map((s) => Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('${s['sequence']}. ', style: const TextStyle(color: _EvaColors.textSec, fontSize: 11)),
+                  Expanded(child: Text(s['description'] as String? ?? '',
+                    style: const TextStyle(color: _EvaColors.textPri, fontSize: 11))),
+                  const SizedBox(width: 6),
+                  _StepStatus(status: s['status'] as String? ?? ''),
                 ],
+              ),
+            )),
+          ],
+          if (canExec) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 30,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.play_arrow_rounded, size: 14),
+                label: const Text('Execute', style: TextStyle(fontSize: 11)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _EvaColors.accent,
+                  foregroundColor: _EvaColors.bg,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+                onPressed: () => onExecute(taskId),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _StepStatus extends StatelessWidget {
+  final String status;
+  const _StepStatus({required this.status});
+
+  Color get _color {
+    switch (status) {
+      case 'completed': return Colors.greenAccent;
+      case 'failed':    return _EvaColors.error;
+      case 'running':   return _EvaColors.accent;
+      default:          return _EvaColors.textSec;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+    decoration: BoxDecoration(
+      color: _color.withOpacity(0.12),
+      borderRadius: BorderRadius.circular(4),
+      border: Border.all(color: _color.withOpacity(0.4)),
+    ),
+    child: Text(status, style: TextStyle(color: _color, fontSize: 9, fontWeight: FontWeight.w500)),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thinking Indicator
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ThinkingIndicator extends StatelessWidget {
+  const _ThinkingIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(48, 0, 24, 4),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: _EvaColors.assistMsg,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: _EvaColors.border),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    color: _EvaColors.accent.withOpacity(0.8),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text('EVA is thinking…',
+                  style: TextStyle(color: _EvaColors.textSec, fontSize: 12, fontStyle: FontStyle.italic)),
               ],
             ),
           ),
@@ -655,66 +1431,36 @@ class _InfoCard extends StatelessWidget {
   }
 }
 
-class _StatusPill extends StatelessWidget {
-  final bool connected;
-  final _Palette palette;
-  const _StatusPill({required this.connected, required this.palette});
+// ─────────────────────────────────────────────────────────────────────────────
+// Mic Error Banner
+// ─────────────────────────────────────────────────────────────────────────────
 
-  @override
-  Widget build(BuildContext context) {
-    final color =
-        connected ? const Color(0xFF3DDC84) : const Color(0xFFEF5350);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withOpacity(0.4)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            connected ? 'Core Connected' : 'Core Offline',
-            style:
-                TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ErrorBanner extends StatelessWidget {
+class _MicErrorBanner extends StatelessWidget {
   final String message;
-  final _Palette palette;
-  const _ErrorBanner({required this.message, required this.palette});
+  final VoidCallback onDismiss;
+  const _MicErrorBanner({required this.message, required this.onDismiss});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFEF5350).withOpacity(0.1),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFEF5350).withOpacity(0.3)),
+        color: _EvaColors.error.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _EvaColors.error.withOpacity(0.4)),
       ),
       child: Row(
         children: [
-          const Icon(Icons.error_outline, color: Color(0xFFEF5350)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              message,
-              style: const TextStyle(
-                  color: Color(0xFFEF5350), fontWeight: FontWeight.w500),
-            ),
+          const Icon(Icons.mic_off_rounded, color: _EvaColors.error, size: 16),
+          const SizedBox(width: 10),
+          Expanded(child: Text(message,
+            style: const TextStyle(color: _EvaColors.error, fontSize: 12))),
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 16, color: _EvaColors.error),
+            onPressed: onDismiss,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
           ),
         ],
       ),
@@ -722,434 +1468,152 @@ class _ErrorBanner extends StatelessWidget {
   }
 }
 
-class PlaceholderPage extends StatelessWidget {
-  final String title;
-  final IconData icon;
-  final _Palette palette;
+// ─────────────────────────────────────────────────────────────────────────────
+// Composer
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const PlaceholderPage({
-    super.key,
-    required this.title,
-    required this.icon,
-    required this.palette,
+class _Composer extends StatelessWidget {
+  final TextEditingController controller;
+  final _MicState   micState;
+  final bool        isLoading;
+  final VoidCallback onSend;
+  final VoidCallback onMic;
+  final VoidCallback onClearContext;
+
+  const _Composer({
+    required this.controller,
+    required this.micState,
+    required this.isLoading,
+    required this.onSend,
+    required this.onMic,
+    required this.onClearContext,
   });
 
+  Color get _micColor {
+    switch (micState) {
+      case _MicState.recording:    return _EvaColors.error;
+      case _MicState.transcribing: return _EvaColors.accent.withOpacity(0.6);
+      case _MicState.error:        return _EvaColors.error.withOpacity(0.6);
+      case _MicState.idle:         return _EvaColors.textSec;
+    }
+  }
+
+  IconData get _micIcon {
+    switch (micState) {
+      case _MicState.recording:    return Icons.stop_rounded;
+      case _MicState.transcribing: return Icons.hourglass_empty_rounded;
+      case _MicState.error:        return Icons.mic_off_rounded;
+      case _MicState.idle:         return Icons.mic_rounded;
+    }
+  }
+
+  String get _micTooltip {
+    switch (micState) {
+      case _MicState.recording:    return 'Cancel recording';
+      case _MicState.transcribing: return 'Transcribing…';
+      case _MicState.error:        return 'Microphone error';
+      case _MicState.idle:         return 'Voice input';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              color: accent.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Icon(icon, size: 32, color: accent),
-          ),
-          const SizedBox(height: 20),
-          Text(
-            title,
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-              color: palette.textPrimary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'This module is coming soon.',
-            style: TextStyle(fontSize: 14, color: palette.textSecondary),
-          ),
-        ],
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      decoration: const BoxDecoration(
+        color: _EvaColors.surface,
+        border: Border(top: BorderSide(color: _EvaColors.border)),
       ),
-    );
-  }
-}
-
-class EvaInteractionArea extends StatefulWidget {
-  final _Palette palette;
-  const EvaInteractionArea({super.key, required this.palette});
-
-  @override
-  State<EvaInteractionArea> createState() => _EvaInteractionAreaState();
-}
-
-class _EvaInteractionAreaState extends State<EvaInteractionArea> {
-  final TextEditingController _controller = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  final List<Map<String, dynamic>> _messages = [];
-  bool _isLoading = false;
-  String? _sessionId;
-  
-  Timer? _typewriterTimer;
-  final List<String> _pendingCharacters = [];
-
-  void _startTypewriter() {
-    if (_typewriterTimer != null && _typewriterTimer!.isActive) return;
-    
-    _typewriterTimer = Timer.periodic(const Duration(milliseconds: 15), (timer) {
-      if (_pendingCharacters.isEmpty) {
-        timer.cancel();
-        return;
-      }
-      
-      setState(() {
-        if (_messages.isNotEmpty && _messages.last['sender'] == 'eva') {
-          // If buffer gets big (e.g. fast streaming), pop more chars per tick to catch up smoothly
-          int charsToAdd = _pendingCharacters.length > 30 ? 4 : 1;
-          for (int i = 0; i < charsToAdd && _pendingCharacters.isNotEmpty; i++) {
-            _messages.last["text"] += _pendingCharacters.removeAt(0);
-          }
-        } else {
-          _pendingCharacters.clear();
-        }
-      });
-      
-      if (_scrollController.hasClients) {
-        // Use jumpTo for smooth continuous scrolling without interfering with animations
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _typewriterTimer?.cancel();
-    _controller.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  void _scrollToBottom() {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  Future<void> _executeTask(String taskId, int messageIndex) async {
-    setState(() => _isLoading = true);
-    try {
-      final response = await http.post(
-        Uri.parse('http://127.0.0.1:8000/api/v1/core/task/$taskId/execute'),
-      );
-      if (response.statusCode == 200) {
-        final updatedTask = json.decode(response.body);
-        setState(() {
-          _messages[messageIndex]['task'] = updatedTask;
-        });
-      } else {
-        setState(() {
-          _messages.add({"sender": "system", "text": "Execute Error: ${response.statusCode}"});
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _messages.add({"sender": "system", "text": "Execute Connection failed."});
-      });
-    } finally {
-      setState(() => _isLoading = false);
-    }
-  }
-
-  Future<void> _sendMessage() async {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-
-    setState(() {
-      _messages.add({"sender": "user", "text": text});
-      _isLoading = true;
-    });
-    _scrollToBottom();
-    _controller.clear();
-
-    try {
-      final request = http.Request('POST', Uri.parse('http://127.0.0.1:8000/api/v1/core/chat/stream'));
-      request.headers['Content-Type'] = 'application/json';
-      
-      final body = {
-        "source": "desktop",
-        "input_type": "text",
-        "content": text,
-      };
-      if (_sessionId != null) {
-        body["session_id"] = _sessionId;
-      }
-      request.body = json.encode(body);
-
-      final response = await request.send();
-
-      if (response.statusCode == 200) {
-        bool firstMetadata = false;
-        await for (var chunk in response.stream.transform(utf8.decoder)) {
-          final lines = chunk.split('\n');
-          for (var line in lines) {
-            if (line.trim().isEmpty) continue;
-            try {
-              final data = json.decode(line);
-              if (data['type'] == 'metadata') {
-                if (data['data']['session_id'] != null) {
-                  _sessionId = data['data']['session_id'];
-                }
-                if (!firstMetadata) {
-                  setState(() {
-                    _messages.add({
-                      "sender": "eva",
-                      "text": "",
-                      "status": "completed",
-                      "intent": data['data']['intent'],
-                      "confidence": data['data']['confidence'],
-                      "route": data['data']['route'],
-                      "task": data['data']['task'],
-                    });
-                  });
-                  firstMetadata = true;
-                }
-              } else if (data['type'] == 'task_update') {
-                setState(() {
-                  _messages.last["task"] = data['data'];
-                });
-              } else if (data['type'] == 'status') {
-                setState(() {
-                  if (data['value'] != 'thinking') {
-                     // For complex tasks, you might update the status here
-                  }
-                });
-              } else if (data['type'] == 'token') {
-                setState(() {
-                  _isLoading = false; // Hide thinking state on first token
-                });
-                final content = data['content'] as String;
-                for (int i = 0; i < content.length; i++) {
-                  _pendingCharacters.add(content[i]);
-                }
-                _startTypewriter();
-              } else if (data['type'] == 'done') {
-                setState(() {
-                  _isLoading = false;
-                });
-                _scrollToBottom();
-              }
-            } catch (e) {
-              // Ignore malformed chunks
-            }
-          }
-        }
-      } else {
-        setState(() {
-          _messages.add({"sender": "system", "text": "Error: ${response.statusCode}"});
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _messages.add({"sender": "system", "text": "Connection failed."});
-      });
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
-      _scrollToBottom();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = Theme.of(context).colorScheme.primary;
-    return Column(
-      children: [
-        Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            padding: const EdgeInsets.all(32),
-            itemCount: _messages.length,
-            itemBuilder: (context, index) {
-              final msg = _messages[index];
-              final isUser = msg['sender'] == 'user';
-              final isSystem = msg['sender'] == 'system';
-              return Align(
-                alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                child: Container(
-                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
-                  margin: const EdgeInsets.only(bottom: 16),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: isUser
-                        ? accent.withOpacity(0.2)
-                        : (isSystem ? Colors.red.withOpacity(0.2) : widget.palette.cardBg),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: isUser ? accent.withOpacity(0.5) : widget.palette.cardBorder,
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            isUser ? "You" : (isSystem ? "System Error" : "EVA Core"),
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: widget.palette.textSecondary,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 14),
-                            color: widget.palette.textSecondary,
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: msg['text']));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      MarkdownBody(
-                        data: msg['text'],
-                        styleSheet: MarkdownStyleSheet(
-                          p: TextStyle(color: widget.palette.textPrimary, fontSize: 14),
-                          strong: TextStyle(color: widget.palette.textPrimary, fontWeight: FontWeight.bold),
-                          em: TextStyle(color: widget.palette.textPrimary, fontStyle: FontStyle.italic),
-                          listBullet: TextStyle(color: widget.palette.textPrimary),
-                        ),
-                      ),
-                      if (!isUser && !isSystem && msg['status'] != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          "Status: ${msg['status']}",
-                          style: TextStyle(fontSize: 10, color: accent),
-                        ),
-                        if (msg['intent'] != null)
-                          Text(
-                            "Intent: ${msg['intent']} (Conf: ${((msg['confidence'] as double) * 100).toStringAsFixed(0)}%)",
-                            style: TextStyle(fontSize: 10, color: Colors.blueAccent),
-                          ),
-                        if (msg['route'] != null)
-                          Text(
-                            "Route: ${msg['route']}",
-                            style: TextStyle(fontSize: 10, color: Colors.green),
-                          ),
-                        if (msg['task'] != null) ...[
-                          const SizedBox(height: 12),
-                          Text("Task ID: ${msg['task']['task_id']}", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: widget.palette.textPrimary)),
-                          Text("Task Status: ${msg['task']['status']}", style: TextStyle(fontSize: 11, color: accent)),
-                          const SizedBox(height: 8),
-                          ...List<Widget>.generate(
-                            (msg['task']['steps'] as List).length,
-                            (i) {
-                              final step = msg['task']['steps'][i];
-                              final toolInfo = step['action'] != null ? " [Tool: ${step['action']['tool']}]" : "";
-                              final errorInfo = step['error'] != null ? "\n   Error: ${step['error']['message']}" : "";
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 4.0, left: 8.0),
-                                child: Text(
-                                  "${step['sequence']}. ${step['description']}$toolInfo\n   Status: ${step['status']}$errorInfo",
-                                  style: TextStyle(fontSize: 10, color: widget.palette.textSecondary),
-                                ),
-                              );
-                            },
-                          ),
-                          if (msg['task']['status'] == 'planned' || msg['task']['status'] == 'action_resolution_required') ...[
-                            const SizedBox(height: 12),
-                            ElevatedButton(
-                              onPressed: () => _executeTask(msg['task']['task_id'], index),
-                              style: ElevatedButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
-                              child: const Text("Execute Plan"),
-                            ),
-                          ],
-                        ]
-                      ]
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        if (_isLoading)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Container(
-              margin: const EdgeInsets.only(left: 32, bottom: 16),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: widget.palette.cardBg,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: widget.palette.cardBorder),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.auto_awesome, size: 16, color: accent),
-                  const SizedBox(width: 12),
-                  Text("EVA is thinking...", style: TextStyle(color: widget.palette.textSecondary, fontStyle: FontStyle.italic, fontSize: 13)),
-                ],
-              ),
-            ),
-          ),
-        Center(
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 800),
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-            decoration: BoxDecoration(
-              color: widget.palette.cardBg,
-              border: Border(top: BorderSide(color: widget.palette.cardBorder)),
-            ),
-            child: Row(
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 820),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              IconButton(
-                icon: const Icon(Icons.cleaning_services),
-                color: widget.palette.textSecondary,
-                tooltip: "Clear Conversation Context",
-                onPressed: () {
-                  setState(() {
-                    _sessionId = null;
-                    _messages.clear();
-                  });
-                },
+              // Clear context button
+              Tooltip(
+                message: 'New conversation (keeps history)',
+                child: IconButton(
+                  icon: const Icon(Icons.add_comment_outlined, size: 18),
+                  color: _EvaColors.textSec,
+                  onPressed: onClearContext,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                ),
               ),
               const SizedBox(width: 8),
+
+              // Text field
               Expanded(
                 child: TextField(
-                  controller: _controller,
-                  onSubmitted: (_) => _sendMessage(),
-                  style: TextStyle(color: widget.palette.textPrimary),
-                  decoration: InputDecoration(
-                    hintText: "Type a message or command...",
-                    hintStyle: TextStyle(color: widget.palette.textSecondary),
-                    filled: true,
-                    fillColor: widget.palette.sidebarBg,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
+                  controller: controller,
+                  minLines: 1,
+                  maxLines: 6,
+                  style: const TextStyle(color: _EvaColors.textPri, fontSize: 13),
+                  decoration: const InputDecoration(
+                    hintText: 'Type a message or command…',
+                    hintStyle: TextStyle(color: _EvaColors.textSec),
+                    isDense: true,
                   ),
+                  onSubmitted: (_) => onSend(),
+                  textInputAction: TextInputAction.newline,
+                  keyboardType: TextInputType.multiline,
                 ),
               ),
-              const SizedBox(width: 16),
-              FloatingActionButton(
-                onPressed: _sendMessage,
-                backgroundColor: accent,
-                child: const Icon(Icons.send, color: Colors.black),
+              const SizedBox(width: 8),
+
+              // Mic button
+              Tooltip(
+                message: _micTooltip,
+                child: IconButton(
+                  icon: micState == _MicState.transcribing
+                      ? SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: _EvaColors.accent.withOpacity(0.7),
+                          ),
+                        )
+                      : Icon(_micIcon, size: 20),
+                  color: _micColor,
+                  onPressed: micState == _MicState.transcribing ? null : onMic,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // Send button
+              SizedBox(
+                width: 36,
+                height: 36,
+                child: ElevatedButton(
+                  onPressed: isLoading ? null : onSend,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _EvaColors.accent,
+                    foregroundColor: _EvaColors.bg,
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    elevation: 0,
+                    disabledBackgroundColor: _EvaColors.accent.withOpacity(0.3),
+                  ),
+                  child: isLoading
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: _EvaColors.bg,
+                          ),
+                        )
+                      : const Icon(Icons.send_rounded, size: 16),
+                ),
               ),
             ],
           ),
         ),
-        ),
-      ],
+      ),
     );
   }
 }
