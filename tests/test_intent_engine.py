@@ -47,6 +47,46 @@ async def test_fast_path_application():
     assert intent2.parameters.get("application") == "vscode"
 
 @pytest.mark.asyncio
+async def test_application_lifecycle_and_browser_search_fast_paths():
+    engine = IntentEngine(llm_provider=MockLLMProvider({}))
+    close = await engine.determine_intent("close firefox")
+    assert close.intent == "application_operation"
+    assert close.parameters["operation"] == "close"
+    focus = await engine.determine_intent("focus vscode")
+    assert focus.parameters["operation"] == "focus"
+    search = await engine.determine_intent("search for Python tutorials in firefox")
+    assert search.intent == "browser_operation"
+    assert search.parameters == {"query": "python tutorials", "application": "firefox"}
+    contextual = await engine.determine_intent("close it")
+    assert contextual.parameters["application"] == "__context__"
+
+    intent3 = await engine.determine_intent("hey could you open vs code for me")
+    assert intent3.intent == "application_operation"
+    assert intent3.parameters.get("application") == "vs code"
+    assert intent3.parameters.get("new_window") is False
+
+    intent4 = await engine.determine_intent("i want a new window of vs code to be opened")
+    assert intent4.intent == "application_operation"
+    assert intent4.parameters.get("application") == "vs code"
+    assert intent4.parameters.get("new_window") is True
+
+    intent5 = await engine.determine_intent("open settings")
+    assert intent5.intent == "application_operation"
+    assert intent5.parameters.get("application") == "settings"
+
+    intent6 = await engine.determine_intent("open file explorer")
+    assert intent6.intent == "desktop_operation"
+    assert intent6.parameters.get("request") == "open file explorer"
+
+    volume = await engine.determine_intent("set volume to 40")
+    assert volume.intent == "desktop_control"
+    assert volume.parameters == {"operation": "set_volume", "value": 40.0}
+
+    mute = await engine.determine_intent("mute audio")
+    assert mute.intent == "desktop_control"
+    assert mute.parameters == {"operation": "mute"}
+
+@pytest.mark.asyncio
 async def test_fast_path_file_creation():
     engine = IntentEngine(llm_provider=MockLLMProvider({}))
     intent = await engine.determine_intent("create a folder")

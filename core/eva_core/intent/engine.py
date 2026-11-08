@@ -11,6 +11,7 @@ INTENT_CATEGORIES = [
     "system_command",
     "file_operation",
     "application_operation",
+    "editor_operation",
     "browser_operation",
     "document_operation",
     "complex_task",

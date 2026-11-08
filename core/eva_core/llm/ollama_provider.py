@@ -26,7 +26,7 @@ class OllamaProvider(LLMProvider, PlanningProvider):
                 data = response.json()
                 result_text = data.get("response", "{}")
                 return json.loads(result_text)
-        except httpx.RequestError as e:
+        except httpx.HTTPError as e:
             logging.error(f"Ollama connection error: {e}")
             raise RuntimeError(f"Ollama provider unavailable: {e}")
         except json.JSONDecodeError as e:
@@ -56,9 +56,9 @@ class OllamaProvider(LLMProvider, PlanningProvider):
                                 data = json.loads(line)
                                 if "response" in data:
                                     yield data["response"]
-                            except json.JSONDecodeError:
-                                pass
-        except httpx.RequestError as e:
+                            except json.JSONDecodeError as e:
+                                raise RuntimeError("Ollama returned an invalid streaming response.") from e
+        except httpx.HTTPError as e:
             logging.error(f"Ollama streaming connection error: {e}")
-            yield f"\n[Connection error: {e}]"
+            raise RuntimeError("Ollama provider unavailable during response generation.") from e
 

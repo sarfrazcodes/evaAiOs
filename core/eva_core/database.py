@@ -6,9 +6,11 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'eva.db')
 
 def init_db():
     """Initializes the SQLite database foundation for Phase 1."""
+    conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
         
         # Create a basic configuration table to establish DB functionality
         cursor.execute('''
@@ -56,6 +58,25 @@ def init_db():
                 FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks (task_id) ON DELETE CASCADE,
+                FOREIGN KEY (step_id) REFERENCES task_steps (step_id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_confirmations_task ON confirmations(task_id)
+        ''')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS conversations (
@@ -90,5 +111,19 @@ def init_db():
         logging.info(f"Database initialized at {DB_PATH}")
         return True
     except Exception as e:
+        if conn is not None:
+            conn.rollback()
+            conn.close()
         logging.error(f"Failed to initialize database: {e}")
         return False
+
+
+def database_health() -> dict:
+    """Return non-sensitive database availability information for diagnostics."""
+    try:
+        with sqlite3.connect(DB_PATH, timeout=2) as conn:
+            conn.execute("SELECT 1")
+        return {"available": True}
+    except sqlite3.Error as exc:
+        logging.error("Database health check failed: %s", exc)
+        return {"available": False, "error": "database_unavailable"}

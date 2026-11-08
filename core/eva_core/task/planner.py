@@ -52,7 +52,8 @@ Never include OS execution commands, just describe the logical action.
             )
             task_steps.append(ts)
             
-        # Wire up dependencies
+        # Wire up dependencies, rejecting malformed references instead of
+        # silently changing the meaning of the model's plan.
         for i, plan_step in enumerate(plan.steps):
             deps = []
             if not plan_step.dependencies and i > 0:
@@ -62,10 +63,13 @@ Never include OS execution commands, just describe the logical action.
                 for dep_idx in plan_step.dependencies:
                     # Validate dependency bounds
                     if dep_idx < 1 or dep_idx > len(task_steps):
-                        logging.warning(f"Invalid dependency index {dep_idx} skipped.")
-                        continue
+                        raise ValueError(
+                            f"Step {i + 1} references nonexistent dependency {dep_idx}."
+                        )
                     if dep_idx == i + 1:
-                        raise ValueError("Step cannot depend on itself.")
+                        raise ValueError(
+                            f"Step cannot depend on itself (step {i + 1})."
+                        )
                     
                     dep_step_id = task_steps[dep_idx - 1].step_id
                     deps.append(dep_step_id)

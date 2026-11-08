@@ -2,28 +2,32 @@ import logging
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from system.eva_system.sys_info import get_system_info
-from core.eva_core.database import init_db
+from core.eva_core.database import database_health, init_db
 import sys
 import os
 import json
 import sqlite3
+import httpx
+import re
 
 # Add project root to path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
-from core.eva_core.protocol import RequestModel, ResponseModel, TaskStatus
+from core.eva_core.protocol import ActionModel, RequestModel, ResponseModel, TaskStatus, TaskStep
 from core.eva_core.llm.ollama_provider import OllamaProvider
 from core.eva_core.intent.engine import IntentEngine
 from core.eva_core.intent.router import Router
 from core.eva_core.task.planner import Planner
 from core.eva_core.task.state import TaskStateManager
 from core.eva_core.executor.executor import Executor
+from core.eva_core.task.runner import TaskRunner
 from core.eva_core.tools.registry import ToolRegistry
 from core.eva_core.permissions.hook import PermissionHook
 from core.eva_core.tools.echo import EchoTool
 from core.eva_core.tools.calculator import CalculatorTool
 from core.eva_core.tools.file import FileTool
 from core.eva_core.tools.application import ApplicationTool
+from core.eva_core.tools.desktop import DesktopTool
 from core.eva_core.context.manager import ConversationContextManager
 from core.eva_core.stt.transcriber import (
     get_transcriber,
@@ -58,9 +62,161 @@ tool_registry.register(EchoTool())
 tool_registry.register(CalculatorTool())
 tool_registry.register(FileTool())
 tool_registry.register(ApplicationTool())
+tool_registry.register(DesktopTool())
 
 permission_hook = PermissionHook()
 executor = Executor(state_manager=state_manager, tool_registry=tool_registry, permission_hook=permission_hook)
+task_runner = TaskRunner(executor=executor, state_manager=state_manager)
+
+
+def execute_safe_intent(intent_model):
+    init_db()
+    arguments = dict(intent_model.parameters)
+    if intent_model.intent == "application_operation":
+        arguments["operation"] = arguments.get("operation", "open")
+        tool_name = "application_tool"
+    elif intent_model.intent == "editor_operation":
+        arguments["operation"] = "write_text"
+        arguments["application"] = arguments.get("application", "text editor")
+        tool_name = "application_tool"
+    elif intent_model.intent == "desktop_operation":
+        arguments = {
+            "operation": "open_directory",
+            "path": {
+                "open downloads": os.path.expanduser("~/Downloads"),
+                "open downloads folder": os.path.expanduser("~/Downloads"),
+                "open home folder": os.path.expanduser("~"),
+                "open file manager": os.path.expanduser("~"),
+                "open file explorer": os.path.expanduser("~"),
+                "open folder": os.path.expanduser("~"),
+            }.get(arguments.get("request"), os.path.expanduser("~")),
+        }
+        tool_name = "desktop_tool"
+    elif intent_model.intent == "file_operation":
+        if arguments.get("operation") not in {"create_file", "create_directory", "read_file", "list_directory"}:
+            return None
+        tool_name = "file_tool"
+    elif intent_model.intent == "desktop_control":
+        arguments = dict(intent_model.parameters)
+        tool_name = "desktop_tool"
+    elif intent_model.intent == "browser_operation":
+        tool_name = "application_tool"
+        arguments["operation"] = "search"
+        if not arguments.get("application"):
+            arguments["application"] = os.environ.get("EVA_DEFAULT_BROWSER", "chrome")
+    else:
+        return None
+
+    task = state_manager.create_task(request_id=f"intent-{os.urandom(8).hex()}", intent=intent_model.intent)
+    step = TaskStep(
+        task_id=task.task_id,
+        sequence=1,
+        description=f"Execute {intent_model.intent}",
+        action=ActionModel(tool=tool_name, arguments=arguments),
+    )
+    state_manager.save_plan(task.task_id, [step])
+    state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
+    executor.execute_task(task.task_id)
+    return state_manager.get_task(task.task_id)
+
+
+async def create_editor_write_task(request_id: str, request: str):
+    result = await llm_provider.generate_json(
+        prompt=f"Write one short, natural paragraph about the user's requested topic. Return JSON only with a single 'text' string. User request: {request}",
+        system="You generate concise demo text. Do not include markdown, commands, or extra fields.",
+    )
+    text = result.get("text") if isinstance(result, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("The language model returned no writing text.")
+    task = state_manager.create_task(request_id=request_id, intent="editor_operation")
+    step = TaskStep(
+        task_id=task.task_id,
+        sequence=1,
+        description="Write generated paragraph into the active text editor",
+        action=ActionModel(tool="application_tool", arguments={"operation": "write_text", "application": "text editor", "text": text.strip()}),
+    )
+    state_manager.save_plan(task.task_id, [step])
+    state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
+    task_runner.submit(task.task_id)
+    return state_manager.get_task(task.task_id)
+
+
+def _resolve_contextual_application(intent_model, conversation_id: str | None):
+    if intent_model.parameters.get("application") != "__context__" or not conversation_id:
+        return intent_model
+    messages = context_manager.get_recent_messages(conversation_id)
+    known_apps = sorted(ApplicationTool.ALLOWLIST, key=len, reverse=True)
+    for message in reversed(messages):
+        content = message.content.lower()
+        for app_name in known_apps:
+            if app_name in content:
+                intent_model.parameters["application"] = app_name
+                return intent_model
+    intent_model.intent = "ambiguous"
+    intent_model.confidence = 0.0
+    intent_model.reason = "No unambiguous application in conversation context"
+    return intent_model
+
+
+def _resolve_browser_context(intent_model, conversation_id: str | None):
+    if intent_model.intent != "browser_operation" or intent_model.parameters.get("application"):
+        return intent_model
+    if conversation_id:
+        messages = context_manager.get_recent_messages(conversation_id)
+        for message in reversed(messages):
+            content = message.content.lower()
+            for app_name in ("firefox", "chrome", "google chrome", "brave"):
+                if app_name in content:
+                    intent_model.parameters["application"] = app_name
+                    return intent_model
+    intent_model.parameters["application"] = os.environ.get("EVA_DEFAULT_BROWSER", "chrome")
+    return intent_model
+
+
+def _deterministic_control_plan(task_id: str, request: str):
+    normalized = request.lower()
+    known_apps = {
+        "chrome": "chrome", "google chrome": "chrome", "firefox": "firefox",
+        "brave": "brave", "vscode": "vscode", "vs code": "vscode",
+        "visual studio code": "vscode",
+    }
+    steps = []
+    selected_browser = None
+    if re.search(r"\b(minimize|hide)\b.*\b(editor|text editor|notepad)\b", normalized):
+        steps.append(TaskStep(
+            task_id=task_id,
+            sequence=1,
+            description="Minimize the text editor",
+            action=ActionModel(tool="application_tool", arguments={"operation": "minimize", "application": "text editor"}),
+        ))
+    open_segment = re.split(r"\b(?:search|google|look up|find)\b", normalized, maxsplit=1)[0]
+    open_matches = re.finditer(r"\b(chrome|google chrome|firefox|brave|vscode|vs code|visual studio code)\b", open_segment)
+    for match in open_matches:
+        app_name = known_apps[match.group(1)]
+        if app_name in {"chrome", "firefox", "brave"}:
+            selected_browser = app_name
+        steps.append(TaskStep(
+            task_id=task_id,
+            sequence=len(steps) + 1,
+            description=f"Open or focus {app_name}",
+            action=ActionModel(tool="application_tool", arguments={"operation": "open", "application": app_name}),
+        ))
+
+    search_parts = re.findall(r"\b(?:search|google|look up|find|play)(?: for)?\s+(.+?)(?=\s+then\s+search|\s+and\s+search|\s+on\s+youtube|$)", normalized)
+    for query in search_parts:
+        browser = selected_browser or os.environ.get("EVA_DEFAULT_BROWSER", "chrome")
+        is_youtube = "youtube" in normalized or "play " in normalized
+        steps.append(TaskStep(
+            task_id=task_id,
+            sequence=len(steps) + 1,
+            description=f"Search {browser} for {query.strip()}",
+            dependencies=[steps[-1].step_id] if steps else [],
+            action=ActionModel(tool="application_tool", arguments={"operation": "youtube_search" if is_youtube else "search", "application": browser, "query": query.strip(), "search_provider": "youtube" if is_youtube else "google"}),
+        ))
+    for index in range(1, len(steps)):
+        if not steps[index].dependencies:
+            steps[index].dependencies = [steps[index - 1].step_id]
+    return steps or None
 
 @app.on_event("startup")
 async def startup_event():
@@ -72,6 +228,27 @@ async def startup_event():
 @app.get("/api/health")
 def health_check():
     return {"status": "Running", "service": "EVA Core Phase 1"}
+
+
+@app.get("/api/health/detailed")
+def detailed_health_check():
+    db_status = database_health()
+    ollama_status = {"available": False, "model": model_name, "model_available": False}
+    try:
+        with httpx.Client(timeout=1.5) as client:
+            response = client.get(f"{llm_provider.base_url}/api/tags")
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            names = {model.get("name") for model in models if isinstance(model, dict)}
+            ollama_status.update({"available": True, "model_available": model_name in names})
+    except (httpx.HTTPError, ValueError, TypeError):
+        pass
+
+    return {
+        "status": "healthy" if db_status["available"] else "degraded",
+        "database": db_status,
+        "ollama": ollama_status,
+    }
 
 @app.get("/api/system/info")
 def system_info():
@@ -87,6 +264,8 @@ async def handle_request(req: RequestModel):
     
     # Phase 2B: Intent Engine & Routing
     intent_model = await intent_engine.determine_intent(req.content)
+    intent_model = _resolve_contextual_application(intent_model, req.session_id)
+    intent_model = _resolve_browser_context(intent_model, req.session_id)
     route_result = router.route(intent_model)
     
     status = "completed"
@@ -97,12 +276,50 @@ async def handle_request(req: RequestModel):
         message = "I need more information to understand that request."
     elif route_result.route == "unsupported":
         message = "I'm sorry, I don't support that type of request yet."
+    elif route_result.route == "editor":
+        try:
+            task = await create_editor_write_task(req.request_id, req.content)
+            task_data = json.loads(task.model_dump_json())
+            status = "accepted"
+            message = "I prepared the paragraph for the text editor."
+        except Exception as exc:
+            logging.error("Editor writing preparation failed: %s", exc)
+            status = "failed"
+            message = "I could not prepare the paragraph for the editor."
+    elif route_result.route in ["application", "desktop", "file", "browser"]:
+        task = execute_safe_intent(intent_model)
+        if task is None:
+            message = "That file operation is not supported or needs a path."
+            status = "unsupported"
+            task_data = None
+            data_dict = {
+                "intent": intent_model.intent,
+                "confidence": intent_model.confidence,
+                "route": "unsupported",
+                "parameters": intent_model.parameters,
+            }
+            return ResponseModel(
+                request_id=req.request_id,
+                status=status,
+                message=message,
+                data=data_dict,
+            )
+        task_data = json.loads(task.model_dump_json())
+        if task.status == TaskStatus.BLOCKED:
+            status = "requires_confirmation"
+        if task.status == TaskStatus.COMPLETED:
+            message = f"Request classified as {intent_model.intent}. {task.steps[0].result['message']}"
+        else:
+            outcome = task.steps[0].error.message if task.steps[0].error else "The desktop action failed."
+            message = f"Request classified as {intent_model.intent}. {outcome}"
     elif route_result.route == "planner":
         # Phase 2C: Planner and Task State
         message = f"Request classified as {intent_model.intent}."
         task = state_manager.create_task(request_id=req.request_id, intent=intent_model.intent)
         try:
-            steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
+            steps = _deterministic_control_plan(task.task_id, req.content)
+            if steps is None:
+                steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
             task = state_manager.save_plan(task.task_id, steps)
             task = state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
         except Exception as e:
@@ -149,6 +366,8 @@ async def chat_stream(req: RequestModel):
         formatted_context = context_manager.format_llm_context(conversation_id, req.content)
         
         intent_model = await intent_engine.determine_intent(req.content, formatted_context)
+        intent_model = _resolve_contextual_application(intent_model, conversation_id)
+        intent_model = _resolve_browser_context(intent_model, conversation_id)
         route_result = router.route(intent_model)
 
         data_dict = {
@@ -169,6 +388,18 @@ async def chat_stream(req: RequestModel):
             msg = "I'm sorry, I don't support that type of request yet."
             yield json.dumps({"type": "token", "content": msg}) + "\n"
             context_manager.add_assistant_message(conversation_id, msg)
+        elif route_result.route == "editor":
+            try:
+                task = await create_editor_write_task(req.request_id, req.content)
+                data_dict["task"] = json.loads(task.model_dump_json())
+                yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
+                yield json.dumps({"type": "token", "content": "I prepared the paragraph for the text editor."}) + "\n"
+                context_manager.add_assistant_message(conversation_id, "I prepared the paragraph for the text editor.")
+            except Exception as exc:
+                logging.error("Editor writing preparation failed: %s", exc)
+                yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
+                yield json.dumps({"type": "error", "category": "editor_write_failed", "message": "I could not prepare the paragraph for the editor.", "request_id": req.request_id, "completed": False}) + "\n"
+                return
         elif route_result.route in ["conversation", "information", "clarification"]:
             eva_system_prompt = (
                 "You are EVA, an advanced AI Operating System and intelligent assistant. "
@@ -198,10 +429,38 @@ async def chat_stream(req: RequestModel):
                     if final_chunk:
                         tts_service.enqueue(final_chunk, req.request_id)
             except Exception as e:
-                logging.error(f"Stream generation failed: {e}")
-                yield json.dumps({"type": "error", "message": "Response generation failed."}) + "\n"
+                logging.error("Stream generation failed for request %s: %s", req.request_id, e)
+                yield json.dumps({
+                    "type": "error",
+                    "category": "generation_failed",
+                    "message": "Response generation failed. Please try again.",
+                    "request_id": req.request_id,
+                    "completed": False,
+                }) + "\n"
                 return
                 
+        elif route_result.route in ["application", "desktop", "file", "browser"]:
+            task = execute_safe_intent(intent_model)
+            if task is None:
+                yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
+                yield json.dumps({
+                    "type": "error",
+                    "category": "unsupported_operation",
+                    "message": "That operation is not supported or needs a path.",
+                    "request_id": req.request_id,
+                    "completed": False,
+                }) + "\n"
+                return
+            data_dict["task"] = json.loads(task.model_dump_json())
+            yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
+            if task.status == TaskStatus.COMPLETED:
+                msg = task.steps[0].result["message"]
+            elif task.status == TaskStatus.BLOCKED:
+                msg = "This operation needs your confirmation before it can continue."
+            else:
+                msg = task.steps[0].error.message if task.steps[0].error else "The desktop action failed."
+            yield json.dumps({"type": "token", "content": msg}) + "\n"
+            context_manager.add_assistant_message(conversation_id, msg)
         elif route_result.route == "planner":
             task = state_manager.create_task(request_id=req.request_id, intent=intent_model.intent)
             data_dict["task"] = json.loads(task.model_dump_json())
@@ -210,7 +469,9 @@ async def chat_stream(req: RequestModel):
             
             try:
                 # We don't dump the whole conversation to planner, just the content
-                steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
+                steps = _deterministic_control_plan(task.task_id, req.content)
+                if steps is None:
+                    steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
                 task = state_manager.save_plan(task.task_id, steps)
                 task = state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
                 yield json.dumps({"type": "task_update", "data": json.loads(task.model_dump_json())}) + "\n"
@@ -252,15 +513,90 @@ def get_task(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return task.model_dump()
 
+
+@app.get("/api/v1/core/tasks")
+def list_tasks(limit: int = 50):
+    return [task.model_dump() for task in state_manager.list_tasks(max(1, min(limit, 200)))]
+
 @app.post("/api/v1/core/task/{task_id}/execute")
-def execute_task_endpoint(task_id: str):
+def execute_task_endpoint(task_id: str, background: bool = False):
     task = state_manager.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    executor.execute_task(task_id)
+    if background:
+        if not task_runner.submit(task_id):
+            raise HTTPException(status_code=409, detail="Task is not executable or is already running")
+    else:
+        executor.execute_task(task_id)
     updated_task = state_manager.get_task(task_id)
     return updated_task.model_dump()
+
+
+@app.post("/api/v1/core/task/{task_id}/pause")
+def pause_task_endpoint(task_id: str):
+    if not task_runner.pause(task_id):
+        raise HTTPException(status_code=409, detail="Task is not running")
+    return state_manager.get_task(task_id).model_dump()
+
+
+@app.post("/api/v1/core/task/{task_id}/resume")
+def resume_task_endpoint(task_id: str):
+    if not task_runner.resume(task_id):
+        raise HTTPException(status_code=409, detail="Task is not paused")
+    return state_manager.get_task(task_id).model_dump()
+
+
+@app.post("/api/v1/core/task/{task_id}/stop")
+def stop_task_endpoint(task_id: str):
+    if not task_runner.stop(task_id):
+        raise HTTPException(status_code=409, detail="Task is not running or paused")
+    return state_manager.get_task(task_id).model_dump()
+
+
+@app.get("/api/v1/core/confirmation/{confirmation_id}")
+def get_confirmation_endpoint(confirmation_id: str):
+    confirmation = state_manager.get_confirmation(confirmation_id)
+    if not confirmation:
+        raise HTTPException(status_code=404, detail="Confirmation not found")
+    return confirmation
+
+
+@app.post("/api/v1/core/confirmation/{confirmation_id}/approve")
+def approve_confirmation_endpoint(confirmation_id: str):
+    confirmation = state_manager.get_confirmation(confirmation_id)
+    if not confirmation:
+        raise HTTPException(status_code=404, detail="Confirmation not found")
+    if confirmation["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Confirmation is {confirmation['status']}")
+    if permission_hook.risk_class(confirmation["tool_name"], confirmation["arguments"]).value != "confirm_required":
+        raise HTTPException(status_code=403, detail="This operation cannot be approved")
+
+    approved = state_manager.transition_confirmation(confirmation_id, "approved")
+    if not approved or approved.get("status") != "approved" or not approved.get("transitioned", False):
+        raise HTTPException(status_code=409, detail="Confirmation expired or was already used")
+    state_manager.reset_confirmed_step(confirmation_id)
+    if not task_runner.submit(approved["task_id"], confirmation_id=confirmation_id, wait_seconds=0.25):
+        raise HTTPException(status_code=409, detail="Task is no longer executable")
+    task = state_manager.get_task(approved["task_id"])
+    return {"confirmation": state_manager.get_confirmation(confirmation_id), "task": task.model_dump() if task else None}
+
+
+@app.post("/api/v1/core/confirmation/{confirmation_id}/deny")
+def deny_confirmation_endpoint(confirmation_id: str):
+    confirmation = state_manager.get_confirmation(confirmation_id)
+    if not confirmation:
+        raise HTTPException(status_code=404, detail="Confirmation not found")
+    if confirmation["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Confirmation is {confirmation['status']}")
+    denied = state_manager.transition_confirmation(confirmation_id, "denied")
+    if not denied or denied.get("status") != "denied" or not denied.get("transitioned", False):
+        raise HTTPException(status_code=409, detail="Confirmation expired or was already used")
+    task = state_manager.get_task(confirmation["task_id"])
+    if task and task.status == TaskStatus.BLOCKED:
+        state_manager.transition_task(task.task_id, TaskStatus.CANCELLED)
+        task = state_manager.get_task(task.task_id)
+    return {"confirmation": state_manager.get_confirmation(confirmation_id), "task": task.model_dump() if task else None}
 
 # ── Phase 3B: Conversation History Endpoints ─────────────────────────────────
 

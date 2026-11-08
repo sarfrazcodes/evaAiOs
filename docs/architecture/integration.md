@@ -36,6 +36,19 @@ Planned tasks can be executed via `POST /api/v1/core/task/{task_id}/execute`.
 - **Tool Registry**: Resolved tools are looked up in the deterministic `ToolRegistry` (e.g., Echo, Calculator, FileTool, ApplicationTool).
 - **Permissions Hook**: `PermissionHook` provides pre-execution checks (e.g., rejecting `sudo` or `rm -rf`).
 
+Direct natural-language execution is limited to implemented tools: allowlisted
+application launch, approved desktop directory/audio operations, and validated
+workspace file reads/creation. Browser, document, generic system, and arbitrary
+shell operations remain unsupported.
+
+Application lifecycle operations now distinguish open, focus, running-state,
+and graceful close. An existing application is focused when `wmctrl` is
+available; if it is already running but cannot be focused, EVA reports that
+failure instead of launching a duplicate. Browser search uses an approved
+browser executable and URL-encoded Google search URLs. Common chained open and
+search requests receive deterministic executable task plans with persisted
+dependencies and registered application-tool actions.
+
 ### 6. Results & Context Storage
 - Output results (`ToolResult`) are committed as JSON natively to the SQLite state store.
 - For conversational flows, successful streamed LLM responses are tracked in the `ConversationContextManager` database to maintain persistent short-term multi-turn memory without polluting task data.
@@ -61,3 +74,10 @@ Planned tasks can be executed via `POST /api/v1/core/task/{task_id}/execute`.
 - Blockchain / Vault
 - Persistent Long-Term Memory (LTM)
 - Firebase Cloud sync
+
+### Reliability boundaries
+- NDJSON clients must buffer partial records across HTTP chunks.
+- Generation failures emit an `error` event with `completed: false`; they are
+	not saved as successful assistant responses.
+- Planner and executor dependency references are strict, and task execution is
+	atomically claimed in SQLite to prevent duplicate execution.

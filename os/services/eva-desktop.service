@@ -6,11 +6,15 @@ Requires=eva-core.service
 [Service]
 Type=simple
 User=aegis
+EnvironmentFile=-/etc/eva/eva.env
+Environment=EVA_ROOT=/home/aegis/Desktop/evaAiOs
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
-WorkingDirectory=/home/aegis/Desktop/evaAiOs/desktop/eva_desktop
-ExecStart=/home/aegis/Desktop/evaAiOs/desktop/eva_desktop/build/linux/x64/release/bundle/eva_desktop
+WorkingDirectory=${EVA_ROOT}/desktop/eva_desktop
+ExecStart=${EVA_ROOT}/desktop/eva_desktop/build/linux/x64/release/bundle/eva_desktop
 Restart=on-failure
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=graphical.target

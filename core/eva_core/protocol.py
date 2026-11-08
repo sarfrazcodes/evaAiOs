@@ -57,6 +57,8 @@ class TaskStatus(str, Enum):
     REQUIRES_CLARIFICATION = "requires_clarification"
     BLOCKED = "blocked"
     ACTION_RESOLUTION_REQUIRED = "action_resolution_required"
+    PAUSED = "paused"
+    INTERRUPTED = "interrupted"
 
 class TaskStep(BaseModel):
     step_id: str = Field(default_factory=generate_id)

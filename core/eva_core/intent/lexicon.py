@@ -16,12 +16,22 @@ INTENT_LEXICON = {
         "apps": [
             "chrome", "google chrome",
             "firefox",
+            "brave", "brave browser",
             "vscode", "vs code", "visual studio code", "code",
             "terminal",
-            "notepad",
+            "notepad", "text editor",
             "calculator",
             "file manager"
         ]
+    },
+    "desktop_operation": {
+        "exact": [
+            "open home folder", "open downloads", "open downloads folder",
+            "open file manager", "open file explorer", "open folder"
+        ]
+    },
+    "desktop_control": {
+        "exact": ["read volume", "what is the volume", "mute audio", "mute sound", "unmute audio", "unmute sound"]
     },
     "file_operation": {
         "exact": [

@@ -72,6 +72,18 @@ async def test_planner_self_dependency_rejection():
         await planner.generate_plan("task_123", "Self")
 
 @pytest.mark.asyncio
+async def test_planner_missing_dependency_rejection():
+    mock_resp = {
+        "steps": [
+            {"description": "A", "dependencies": []},
+            {"description": "B", "dependencies": [3]},
+        ]
+    }
+    planner = Planner(MockPlanningProvider(mock_resp))
+    with pytest.raises(ValueError, match="nonexistent dependency"):
+        await planner.generate_plan("task_123", "Missing")
+
+@pytest.mark.asyncio
 async def test_planner_excessive_steps_truncated():
     steps = [{"description": f"Step {i}", "dependencies": []} for i in range(MAX_PLAN_STEPS + 5)]
     mock_resp = {"steps": steps}

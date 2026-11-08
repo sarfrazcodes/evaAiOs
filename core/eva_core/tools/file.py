@@ -15,12 +15,16 @@ class FileTool(BaseTool):
 
     def _resolve_path(self, relative_path: str) -> str:
         """Resolves and validates a path against the WORKSPACE_ROOT to prevent traversal."""
-        # Ensure path doesn't start with a slash which makes join ignore WORKSPACE_ROOT
-        if relative_path.startswith('/'):
-            relative_path = relative_path[1:]
-            
-        absolute_path = os.path.abspath(os.path.join(WORKSPACE_ROOT, relative_path))
-        if not absolute_path.startswith(WORKSPACE_ROOT):
+        if not isinstance(relative_path, str) or os.path.isabs(relative_path):
+            raise ValueError("Absolute paths are not allowed.")
+
+        workspace_root = os.path.realpath(WORKSPACE_ROOT)
+        absolute_path = os.path.realpath(os.path.join(workspace_root, relative_path))
+        try:
+            within_workspace = os.path.commonpath((workspace_root, absolute_path)) == workspace_root
+        except ValueError:
+            within_workspace = False
+        if not within_workspace:
             raise ValueError(f"Path traversal detected: {relative_path} is outside the workspace.")
         return absolute_path
 
@@ -36,14 +40,17 @@ class FileTool(BaseTool):
             target_path = self._resolve_path(path)
 
             if operation == "create_file":
-                with open(target_path, "w") as f:
+                parent_path = os.path.realpath(os.path.dirname(target_path))
+                if os.path.commonpath((os.path.realpath(WORKSPACE_ROOT), parent_path)) != os.path.realpath(WORKSPACE_ROOT):
+                    raise ValueError("File parent is outside the workspace.")
+                with open(target_path, "w", encoding="utf-8") as f:
                     f.write(content)
                 return ToolResult(success=True, tool_name=self.name, message=f"Created file: {path}")
 
             elif operation == "read_file":
                 if not os.path.exists(target_path):
                     return ToolResult(success=False, tool_name=self.name, message="File not found.", error="FileNotFound")
-                with open(target_path, "r") as f:
+                with open(target_path, "r", encoding="utf-8") as f:
                     file_content = f.read()
                 return ToolResult(success=True, tool_name=self.name, message=f"Read file: {path}", data={"content": file_content})
 

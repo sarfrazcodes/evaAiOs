@@ -1,13 +1,18 @@
 [Unit]
 Description=EVA AI OS Core Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=aegis
-WorkingDirectory=/home/aegis/Desktop/evaAiOs
-ExecStart=/home/aegis/Desktop/evaAiOs/venv/bin/uvicorn core.eva_core.main:app --host 127.0.0.1 --port 8000
+EnvironmentFile=-/etc/eva/eva.env
+Environment=EVA_ROOT=/home/aegis/Desktop/evaAiOs
+WorkingDirectory=${EVA_ROOT}
+ExecStart=${EVA_ROOT}/venv/bin/uvicorn core.eva_core.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
+StandardOutput=journal
+StandardError=journal
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

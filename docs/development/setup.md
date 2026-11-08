@@ -20,6 +20,11 @@ This guide explains how to set up the Phase 1 environment for EVA AI OS.
    ./scripts/setup/install_deps.sh
    ```
 
+   The script installs required Python packages and runs `flutter pub get` when
+   Flutter is available. Ollama, Flutter, Linux desktop build packages, and
+   speech models are optional external dependencies and are never downloaded
+   silently.
+
 3. **Install Flutter (if not present)**
    The project requires the Flutter Linux Desktop SDK. 
    ```bash
@@ -37,6 +42,8 @@ To launch both the Python backend core service and the Flutter desktop shell:
 ```
 
 - The Python API will start on `http://127.0.0.1:8000`
+- Detailed database and Ollama status is available at
+   `http://127.0.0.1:8000/api/health/detailed`.
 - The Flutter application will compile and launch natively.
 - Press `Ctrl+C` to terminate both services gracefully.
 
@@ -46,7 +53,7 @@ To verify the backend system integrations:
 
 ```bash
 source venv/bin/activate
-pytest tests/test_backend.py
+PYTHONPATH=. pytest -q
 ```
 
 ## Phase 3C local speech

@@ -451,17 +451,20 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
   bool _ttsSpeaking = false;
   String? _ttsError;
   Timer? _ttsStatusTimer;
+  Timer? _taskPoller;
 
   @override
   void initState() {
     super.initState();
     _loadConversationHistory();
     _startTtsStatusPolling();
+    _taskPoller = Timer.periodic(const Duration(milliseconds: 800), (_) => _refreshTasks());
   }
 
   @override
   void dispose() {
     _ttsStatusTimer?.cancel();
+    _taskPoller?.cancel();
     _silencePoller?.cancel();
     // Cancel any active backend recording on dispose
     if (_recordingId != null) {
@@ -503,6 +506,30 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
     } finally {
       setState(() => _loadingHistory = false);
     }
+  }
+
+  Future<void> _refreshTasks() async {
+    final taskIds = _messages
+        .map((message) => (message['task'] as Map<String, dynamic>?)?['task_id'])
+        .whereType<String>()
+        .toSet();
+    if (taskIds.isEmpty || !mounted) return;
+    try {
+      final response = await http.get(Uri.parse('http://127.0.0.1:8000/api/v1/core/tasks'));
+      if (response.statusCode != 200) return;
+      final tasks = (json.decode(response.body) as List).cast<Map<String, dynamic>>();
+      final byId = {for (final task in tasks) task['task_id'] as String: task};
+      var changed = false;
+      for (final message in _messages) {
+        final task = message['task'] as Map<String, dynamic>?;
+        final updated = task == null ? null : byId[task['task_id']];
+        if (updated != null && json.encode(updated) != json.encode(task)) {
+          message['task'] = updated;
+          changed = true;
+        }
+      }
+      if (changed && mounted) setState(() {});
+    } catch (_) {}
   }
 
   Future<void> _openConversation(_ConvSummary conv) async {
@@ -916,6 +943,9 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
                         itemBuilder: (ctx, i) => _MessageBubble(
                           message: _messages[i],
                           onExecuteTask: (taskId) => _executeTask(taskId, i),
+                          onTaskControl: (taskId, action) => _controlTask(taskId, action, i),
+                          onApproveConfirmation: (confirmationId) => _respondToConfirmation(confirmationId, i, true),
+                          onDenyConfirmation: (confirmationId) => _respondToConfirmation(confirmationId, i, false),
                         ),
                       ),
               ),
@@ -975,6 +1005,44 @@ class _EvaInteractionAreaState extends State<EvaInteractionArea> {
       _addSystemError('Execute connection failed.');
     } finally {
       setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _controlTask(String taskId, String action, int msgIndex) async {
+    try {
+      final response = await http.post(Uri.parse('http://127.0.0.1:8000/api/v1/core/task/$taskId/$action'));
+      if (response.statusCode == 200 && mounted) {
+        setState(() => _messages[msgIndex]['task'] = json.decode(response.body));
+      } else {
+        _addSystemError('Could not $action task (${response.statusCode}).');
+      }
+    } catch (_) {
+      _addSystemError('Could not reach EVA Core to $action task.');
+    }
+  }
+
+  Future<void> _respondToConfirmation(String confirmationId, int msgIndex, bool approve) async {
+    setState(() => _isLoading = true);
+    try {
+      final action = approve ? 'approve' : 'deny';
+      final response = await http.post(
+        Uri.parse('http://127.0.0.1:8000/api/v1/core/confirmation/$confirmationId/$action'),
+      );
+      if (response.statusCode == 200) {
+        final body = json.decode(response.body) as Map<String, dynamic>;
+        setState(() {
+          _messages[msgIndex]['task'] = body['task'];
+          _messages[msgIndex]['text'] = approve
+              ? 'Confirmation approved. The requested operation was processed.'
+              : 'Confirmation denied. The requested operation was cancelled.';
+        });
+      } else {
+        _addSystemError('Confirmation was not accepted (${response.statusCode}).');
+      }
+    } catch (_) {
+      _addSystemError('Could not reach EVA Core to update confirmation.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 }
@@ -1364,7 +1432,16 @@ class _EmptyState extends StatelessWidget {
 class _MessageBubble extends StatelessWidget {
   final Map<String, dynamic> message;
   final ValueChanged<String> onExecuteTask;
-  const _MessageBubble({required this.message, required this.onExecuteTask});
+  final ValueChanged<String> onApproveConfirmation;
+  final ValueChanged<String> onDenyConfirmation;
+  final void Function(String, String) onTaskControl;
+  const _MessageBubble({
+    required this.message,
+    required this.onExecuteTask,
+    required this.onApproveConfirmation,
+    required this.onDenyConfirmation,
+    required this.onTaskControl,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1462,7 +1539,13 @@ class _MessageBubble extends StatelessWidget {
                     // ── Task card ─────────────────────────────────────────
                     if (task != null) ...[
                       const SizedBox(height: 12),
-                      _TaskCard(task: task as Map<String, dynamic>, onExecute: onExecuteTask),
+                      _TaskCard(
+                        task: task as Map<String, dynamic>,
+                        onExecute: onExecuteTask,
+                        onApprove: onApproveConfirmation,
+                        onDeny: onDenyConfirmation,
+                        onControl: onTaskControl,
+                      ),
                     ],
                   ],
                 ),
@@ -1482,7 +1565,16 @@ class _MessageBubble extends StatelessWidget {
 class _TaskCard extends StatelessWidget {
   final Map<String, dynamic> task;
   final ValueChanged<String> onExecute;
-  const _TaskCard({required this.task, required this.onExecute});
+  final ValueChanged<String> onApprove;
+  final ValueChanged<String> onDeny;
+  final void Function(String, String) onControl;
+  const _TaskCard({
+    required this.task,
+    required this.onExecute,
+    required this.onApprove,
+    required this.onDeny,
+    required this.onControl,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1490,6 +1582,18 @@ class _TaskCard extends StatelessWidget {
     final status  = task['status'] as String? ?? '';
     final steps   = (task['steps'] as List? ?? []).cast<Map<String, dynamic>>();
     final canExec = status == 'planned' || status == 'action_resolution_required';
+    Map<String, dynamic>? confirmationStep;
+    for (final step in steps) {
+      final error = step['error'] as Map<String, dynamic>?;
+      if (step['status'] == 'blocked' && error?['code'] == 'RequiresConfirmation') {
+        confirmationStep = step;
+        break;
+      }
+    }
+    final confirmationDetails = confirmationStep == null
+      ? null
+      : ((confirmationStep['error'] as Map<String, dynamic>?)?['details'] as Map<String, dynamic>?);
+    final confirmationId = confirmationDetails?['confirmation_id'] as String?;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -1543,6 +1647,94 @@ class _TaskCard extends StatelessWidget {
               ),
             ),
           ],
+          if (confirmationId != null && confirmationDetails != null) ...[
+            const SizedBox(height: 10),
+            _ConfirmationCard(
+              details: confirmationDetails,
+              onApprove: () => onApprove(confirmationId),
+              onDeny: () => onDeny(confirmationId),
+            ),
+          ],
+          if (taskId.isNotEmpty && (status == 'running' || status == 'paused')) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                if (status == 'running')
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.pause_rounded, size: 14),
+                    label: const Text('Pause', style: TextStyle(fontSize: 11)),
+                    onPressed: () => onControl(taskId, 'pause'),
+                  ),
+                if (status == 'paused')
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.play_arrow_rounded, size: 14),
+                    label: const Text('Resume', style: TextStyle(fontSize: 11)),
+                    onPressed: () => onControl(taskId, 'resume'),
+                  ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.stop_rounded, size: 14),
+                  label: const Text('Stop', style: TextStyle(fontSize: 11)),
+                  onPressed: () => onControl(taskId, 'stop'),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ConfirmationCard extends StatelessWidget {
+  final Map<String, dynamic> details;
+  final VoidCallback onApprove;
+  final VoidCallback onDeny;
+
+  const _ConfirmationCard({
+    required this.details,
+    required this.onApprove,
+    required this.onDeny,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final arguments = (details['arguments'] as Map<String, dynamic>? ?? {});
+    final operation = '${details['tool_name'] ?? 'operation'} / ${arguments['operation'] ?? 'requested action'}';
+    final target = arguments['path'] ?? arguments['application'] ?? arguments['value'];
+    final expiresAt = details['expires_at']?.toString() ?? 'soon';
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.amber.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: Colors.amber.withOpacity(0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Confirmation required', style: TextStyle(color: Colors.amber, fontSize: 12, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(operation, style: const TextStyle(color: _EvaColors.textPri, fontSize: 11)),
+          if (target != null)
+            Text('Target: $target', style: const TextStyle(color: _EvaColors.textSec, fontSize: 11)),
+          Text('This operation changes local state. Expires: $expiresAt', style: const TextStyle(color: _EvaColors.textSec, fontSize: 11)),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              ElevatedButton.icon(
+                icon: const Icon(Icons.check_rounded, size: 14),
+                label: const Text('Approve', style: TextStyle(fontSize: 11)),
+                onPressed: onApprove,
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.close_rounded, size: 14),
+                label: const Text('Deny', style: TextStyle(fontSize: 11)),
+                onPressed: onDeny,
+              ),
+            ],
+          ),
         ],
       ),
     );
