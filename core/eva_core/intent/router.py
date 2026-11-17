@@ -10,6 +10,7 @@ class Router:
             return RouteResult(route="clarification", intent=intent_model.intent, confidence=intent_model.confidence)
 
         intent_to_route = {
+            "personal_identity": "personal_identity",
             "conversation": "conversation",
             "information_request": "information",
             "system_command": "system",

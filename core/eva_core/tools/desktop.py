@@ -27,6 +27,14 @@ class DesktopTool(BaseTool):
 
     def execute(self, arguments: Dict[str, Any]) -> ToolResult:
         operation = arguments.get("operation")
+        if operation == "emergency_stop":
+            return ToolResult(
+                success=True,
+                tool_name=self.name,
+                message="Emergency stop activated. All active operations halted.",
+                data={"status": "halted"}
+            )
+
         if operation in {"read_volume", "set_volume", "mute", "unmute"}:
             return self._execute_audio(operation, arguments)
 

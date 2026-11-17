@@ -30,11 +30,11 @@ class PermissionHook:
             return RiskClass.BLOCKED
         if tool_name == "application_tool" and operation not in {"open", "focus", "check", "check_running", "close", "search", "write_text", "minimize", "restore", "list_windows", "youtube_search"}:
             return RiskClass.BLOCKED
-        if tool_name == "desktop_tool" and operation not in {"open_directory", "read_volume", "set_volume", "mute", "unmute"}:
+        if tool_name == "desktop_tool" and operation not in {"open_directory", "read_volume", "set_volume", "mute", "unmute", "emergency_stop"}:
             return RiskClass.BLOCKED
-        if tool_name == "file_tool" and operation not in {"read_file", "list_directory", "create_file", "create_directory"}:
+        if tool_name == "file_tool" and operation not in {"read_file", "list_directory", "create_file", "create_directory", "edit_file", "append_file", "generate_code", "search_files", "file_info"}:
             return RiskClass.BLOCKED
-        if tool_name == "file_tool" and operation in {"create_file", "create_directory"}:
+        if tool_name == "file_tool" and operation in {"create_file", "create_directory", "edit_file", "append_file", "generate_code"}:
             return RiskClass.CONFIRM_REQUIRED
         if tool_name == "application_tool" and operation == "close":
             return RiskClass.CONFIRM_REQUIRED
@@ -42,7 +42,7 @@ class PermissionHook:
             return RiskClass.CONFIRM_REQUIRED
         if tool_name == "desktop_tool" and operation in {"set_volume", "mute", "unmute"}:
             return RiskClass.CONFIRM_REQUIRED
-        return RiskClass.READ_ONLY if operation in {"read_file", "list_directory", "read_volume", "check", "check_running"} else RiskClass.LOW_RISK
+        return RiskClass.READ_ONLY if operation in {"read_file", "list_directory", "read_volume", "check", "check_running", "search_files", "file_info"} else RiskClass.LOW_RISK
 
     @staticmethod
     def _fingerprint(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -65,7 +65,9 @@ class PermissionHook:
 
     def check_permission(self, tool_name: str, arguments: Dict[str, Any], confirmation_token: str | None = None) -> PermissionDecision:
         risk = self.risk_class(tool_name, arguments)
-        for val in arguments.values():
+        for key, val in arguments.items():
+            if key in {"content", "code", "text", "replacement"}:
+                continue
             if isinstance(val, str):
                 val_lower = val.lower()
                 if any(pattern in val_lower for pattern in ("sudo ", "rm -rf", "shutdown", "reboot", "poweroff", ";", "&&", "|")):
@@ -86,7 +88,9 @@ class PermissionHook:
         """Revalidate an already server-bound approval without trusting its caller."""
         risk = self.risk_class(tool_name, arguments)
         if risk in {RiskClass.BLOCKED, RiskClass.CONFIRM_REQUIRED}:
-            for value in arguments.values():
+            for key, value in arguments.items():
+                if key in {"content", "code", "text", "replacement"}:
+                    continue
                 if isinstance(value, str) and any(pattern in value.lower() for pattern in ("sudo ", "rm -rf", "shutdown", "reboot", "poweroff", ";", "&&", "|")):
                     self._record(tool_name, arguments, PermissionDecision.DENY)
                     return PermissionDecision.DENY

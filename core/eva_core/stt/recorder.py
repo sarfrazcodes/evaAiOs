@@ -38,17 +38,34 @@ _active_recordings: Dict[str, dict] = {}
 _lock = threading.Lock()
 
 
+def _monitor_duration(recording_id: str, duration: float) -> None:
+    """Automatically stop recording when the configured duration expires."""
+    time.sleep(duration)
+    with _lock:
+        rec = _active_recordings.get(recording_id)
+        if rec is not None:
+            rec["duration_expired"] = True
+            proc = rec.get("process")
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    logger.info("Configured duration (%.1fs) expired for recording [%s]", duration, recording_id)
+                except Exception:
+                    pass
+
+
 def _monitor_silence(recording_id: str, wav_path: str) -> None:
-    """Stop an ALSA WAV capture after sustained low RMS audio."""
+    """Stop an ALSA WAV capture after speech is detected followed by sustained trailing silence."""
     threshold = float(os.environ.get("EVA_STT_SILENCE_RMS", "450"))
-    silence_seconds = float(os.environ.get("EVA_STT_SILENCE_SECONDS", "1.4"))
-    grace_seconds = float(os.environ.get("EVA_STT_SILENCE_GRACE", "1.2"))
+    silence_seconds = float(os.environ.get("EVA_STT_SILENCE_SECONDS", "1.5"))
+    grace_seconds = float(os.environ.get("EVA_STT_SILENCE_GRACE", "0.8"))
     started = time.monotonic()
     last_offset = 44
+    speech_detected = False
     silent_since: Optional[float] = None
 
     while True:
-        time.sleep(0.2)
+        time.sleep(0.15)
         with _lock:
             rec = _active_recordings.get(recording_id)
             if rec is None or rec.get("silence_detected"):
@@ -69,7 +86,11 @@ def _monitor_silence(recording_id: str, wav_path: str) -> None:
                 samples = np.frombuffer(audio_file.read(readable), dtype=np.int16)
             last_offset += readable
             rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32))))) if samples.size else 0.0
-            if rms < threshold:
+            if rms >= threshold:
+                speech_detected = True
+                silent_since = None
+            elif speech_detected:
+                # Trailing silence after speech was detected
                 silent_since = silent_since or time.monotonic()
                 if time.monotonic() - silent_since >= silence_seconds:
                     with _lock:
@@ -77,10 +98,8 @@ def _monitor_silence(recording_id: str, wav_path: str) -> None:
                         if rec is not None:
                             rec["silence_detected"] = True
                     process.terminate()
-                    logger.info("Silence detected for recording [%s]", recording_id)
+                    logger.info("Trailing silence detected for recording [%s]", recording_id)
                     return
-            else:
-                silent_since = None
         except (FileNotFoundError, OSError, ValueError):
             return
 
@@ -94,10 +113,11 @@ def _find_recorder() -> Optional[str]:
     return None
 
 
-def start_recording(recording_id: str) -> str:
+def start_recording(recording_id: str, duration: float = 5.0) -> str:
     """
     Start capturing microphone audio using arecord (ALSA).
     Returns the path to the WAV file being written to.
+    Optional duration param: defaults to 5.0 seconds.
     Raises RuntimeError if no recorder is available.
     """
     recorder = _find_recorder()
@@ -111,15 +131,14 @@ def start_recording(recording_id: str) -> str:
     recorder_name = os.path.basename(recorder)
 
     if recorder_name == "arecord":
+        device = os.environ.get("EVA_ALSA_DEVICE", "default")
         cmd = [
             recorder,
-            # plughw:0,0 uses the ALSA plug layer for automatic format conversion.
-            # hw:0,0 (raw hardware) is too strict and rejects 16 kHz on many codecs.
-            "-D", "plughw:0,0",
-            "-f", "S16_LE",      # 16-bit signed little-endian
-            "-r", "16000",       # 16 kHz (Whisper native sample rate)
-            "-c", "1",           # mono
-            "-t", "wav",         # WAV container
+            "-D", device,
+            "-f", "S16_LE",
+            "-r", "16000",
+            "-c", "1",
+            "-t", "wav",
             wav_path,
         ]
     elif recorder_name == "parecord":
@@ -134,7 +153,7 @@ def start_recording(recording_id: str) -> str:
     elif recorder_name == "sox":
         cmd = [
             recorder,
-            "-d",                # default input device
+            "-d",
             "-r", "16000",
             "-c", "1",
             "-e", "signed",
@@ -144,7 +163,7 @@ def start_recording(recording_id: str) -> str:
     else:
         raise RuntimeError(f"Unknown recorder: {recorder}")
 
-    logger.info(f"Starting recording [{recording_id}] with {recorder}: {' '.join(cmd)}")
+    logger.info(f"Starting recording [{recording_id}] (max duration {duration}s) with {recorder}: {' '.join(cmd)}")
 
     try:
         proc = subprocess.Popen(
@@ -161,7 +180,19 @@ def start_recording(recording_id: str) -> str:
             "wav_path": wav_path,
             "recorder": recorder_name,
             "silence_detected": False,
+            "duration_expired": False,
+            "start_time": time.monotonic(),
+            "duration": duration,
         }
+
+    # Start duration countdown watcher
+    if duration > 0:
+        threading.Thread(
+            target=_monitor_duration,
+            args=(recording_id, duration),
+            name=f"eva-dur-{recording_id[:8]}",
+            daemon=True,
+        ).start()
 
     if recorder_name == "arecord":
         threading.Thread(
@@ -179,9 +210,17 @@ def recording_status(recording_id: str) -> Optional[dict]:
         rec = _active_recordings.get(recording_id)
         if rec is None:
             return None
+        start = rec.get("start_time", time.monotonic())
+        dur = rec.get("duration", 5.0)
+        elapsed = time.monotonic() - start
+        remaining = max(0.0, dur - elapsed)
         return {
             "recording": True,
             "silence_detected": rec.get("silence_detected", False),
+            "duration_expired": rec.get("duration_expired", False),
+            "elapsed": round(elapsed, 1),
+            "remaining": round(remaining, 1),
+            "duration": dur,
         }
 
 

@@ -203,6 +203,22 @@ class WhisperTranscriber:
         logger.info(f"Transcribed {len(audio_bytes)} bytes → '{transcript[:80]}…'")
         return transcript
 
+    def transcribe(self, audio_source: Any, mime_type: str = "audio/wav") -> Dict[str, Any]:
+        """
+        Transcribe an audio file path or audio bytes and return a dict with 'text'.
+        Provides compatibility with callers expecting a dict return (e.g. AgenticVoiceService).
+        """
+        if isinstance(audio_source, str):
+            with open(audio_source, "rb") as f:
+                data = f.read()
+        elif isinstance(audio_source, bytes):
+            data = audio_source
+        else:
+            raise ValueError(f"Unsupported audio source type: {type(audio_source)}")
+
+        text = self.transcribe_bytes(data, mime_type=mime_type)
+        return {"text": text}
+
 
 # ── Custom exceptions ─────────────────────────────────────────────────────────
 

@@ -100,6 +100,39 @@ def init_db():
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_conv_msg_conv_id ON conversation_messages(conversation_id)
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memories (
+                memory_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                category TEXT NOT NULL,
+                privacy TEXT NOT NULL DEFAULT 'public',
+                pinned INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'user',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_memories_cat ON memories(category)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_memories_pinned ON memories(pinned)
+        ''')
+
+        # Personal memory schema extensions
+        try:
+            cursor.execute("ALTER TABLE memories ADD COLUMN key TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE memories ADD COLUMN confirmed INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key)
+        ''')
         
         try:
             cursor.execute("ALTER TABLE task_steps ADD COLUMN action TEXT")
@@ -109,6 +142,14 @@ def init_db():
         conn.commit()
         conn.close()
         logging.info(f"Database initialized at {DB_PATH}")
+
+        # Seed verified owner profile and assistant identity
+        try:
+            from core.eva_core.memory.personal_memory import get_personal_memory_manager
+            get_personal_memory_manager()
+        except Exception as seed_err:
+            logging.warning(f"Personal memory seed deferred: {seed_err}")
+
         return True
     except Exception as e:
         if conn is not None:

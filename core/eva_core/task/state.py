@@ -32,11 +32,15 @@ class TaskStateManager:
     def get_task(self, task_id: str) -> Optional[TaskModel]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM tasks WHERE task_id = ?', (task_id,))
+            cursor.execute(
+                'SELECT task_id, request_id, intent, status, current_step, total_steps, created_at, updated_at, result, error '
+                'FROM tasks WHERE task_id = ?',
+                (task_id,)
+            )
             row = cursor.fetchone()
             if not row:
                 return None
-            
+
             task = TaskModel(
                 task_id=row[0],
                 request_id=row[1],
@@ -50,7 +54,15 @@ class TaskStateManager:
                 error=json.loads(row[9]) if row[9] else None
             )
 
-            cursor.execute('SELECT * FROM task_steps WHERE task_id = ? ORDER BY sequence ASC', (task_id,))
+            # Use explicit column list to handle schema differences across DB versions.
+            # 'action' column may be at position 5 (new DB) or added via ALTER TABLE (old DB).
+            # We fetch it by name using a subquery or cursor.description approach.
+            cursor.execute(
+                'SELECT step_id, task_id, sequence, description, dependencies, '
+                'action, status, result, error, created_at, updated_at '
+                'FROM task_steps WHERE task_id = ? ORDER BY sequence ASC',
+                (task_id,)
+            )
             step_rows = cursor.fetchall()
             for s_row in step_rows:
                 step = TaskStep(
@@ -268,7 +280,7 @@ class TaskStateManager:
             TaskStatus.PLANNING: [TaskStatus.PLANNED, TaskStatus.REQUIRES_CLARIFICATION, TaskStatus.FAILED, TaskStatus.CANCELLED],
             TaskStatus.PLANNED: [TaskStatus.READY, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ACTION_RESOLUTION_REQUIRED],
             TaskStatus.READY: [TaskStatus.RUNNING, TaskStatus.CANCELLED],
-            TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.ACTION_RESOLUTION_REQUIRED],
+            TaskStatus.RUNNING: [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.ACTION_RESOLUTION_REQUIRED, TaskStatus.INTERRUPTED, TaskStatus.READY],
             TaskStatus.PAUSED: [TaskStatus.READY, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED],
             TaskStatus.INTERRUPTED: [TaskStatus.READY, TaskStatus.CANCELLED],
             TaskStatus.REQUIRES_CLARIFICATION: [TaskStatus.CANCELLED],

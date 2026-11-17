@@ -6,7 +6,7 @@ import urllib.parse
 import psutil
 from typing import Dict, Any
 from core.eva_core.tools.base import BaseTool
-from core.eva_core.protocol import ToolResult
+from core.eva_core.protocol import ToolResult, MediaExecutionState
 
 class ApplicationTool(BaseTool):
     name = "application_tool"
@@ -84,24 +84,85 @@ class ApplicationTool(BaseTool):
             if operation in {"search", "youtube_search"}:
                 query = arguments.get("query")
                 if not isinstance(query, str) or not query.strip():
-                    return ToolResult(success=False, tool_name=self.name, message="Search query is required.", error="InvalidInput")
+                    return ToolResult(
+                        success=False,
+                        tool_name=self.name,
+                        message="Search query is required.",
+                        error="InvalidInput",
+                        data={"media_state": MediaExecutionState.EXECUTION_FAILED.value},
+                    )
                 if app_name_key not in self.BROWSER_NAMES:
-                    return ToolResult(success=False, tool_name=self.name, message="Search requires an approved browser.", error="InvalidBrowser")
+                    return ToolResult(
+                        success=False,
+                        tool_name=self.name,
+                        message="Search requires an approved browser.",
+                        error="InvalidBrowser",
+                        data={"media_state": MediaExecutionState.EXECUTION_FAILED.value},
+                    )
                 resolved_executable = self._resolve_executable(executable)
                 if not resolved_executable:
-                    return ToolResult(success=False, tool_name=self.name, message=f"Application '{app_name}' is not installed.", error="ApplicationUnavailable")
+                    return ToolResult(
+                        success=False,
+                        tool_name=self.name,
+                        message=f"Application '{app_name}' is not installed.",
+                        error="ApplicationUnavailable",
+                        data={"media_state": MediaExecutionState.EXECUTION_FAILED.value},
+                    )
                 provider = str(arguments.get("search_provider", "youtube" if operation == "youtube_search" else "google")).lower()
                 if provider not in {"google", "youtube"}:
-                    return ToolResult(success=False, tool_name=self.name, message="Unsupported search provider.", error="InvalidSearchProvider")
-                base_url = "https://www.youtube.com/results?search_query=" if provider == "youtube" else "https://www.google.com/search?q="
-                url = base_url + urllib.parse.quote_plus(query.strip())
-                command = [resolved_executable]
-                if arguments.get("new_tab"):
-                    command.append("--new-tab")
-                command.append(url)
-                subprocess.Popen(command, close_fds=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                message = f"Opened YouTube search for: {query.strip()}. Playback may require manual interaction." if provider == "youtube" else f"Opened search for: {query.strip()}"
-                return ToolResult(success=True, tool_name=self.name, message=message, data={"application": app_name_key, "url": url, "query": query.strip(), "playback_verified": False})
+                    return ToolResult(
+                        success=False,
+                        tool_name=self.name,
+                        message="Unsupported search provider.",
+                        error="InvalidSearchProvider",
+                        data={"media_state": MediaExecutionState.EXECUTION_FAILED.value},
+                    )
+
+                if provider == "youtube":
+                    base_url = "https://www.youtube.com/results?search_query="
+                    url = base_url + urllib.parse.quote_plus(query.strip())
+                    command = [resolved_executable]
+                    if arguments.get("new_tab"):
+                        command.append("--new-tab")
+                    command.append(url)
+                    subprocess.Popen(command, close_fds=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    message = (
+                        f"Opened YouTube search for '{query.strip()}'. "
+                        "Direct playback could not be verified automatically; please click to select and play the video in the browser."
+                    )
+                    return ToolResult(
+                        success=True,
+                        tool_name=self.name,
+                        message=message,
+                        data={
+                            "application": app_name_key,
+                            "url": url,
+                            "query": query.strip(),
+                            "media_state": MediaExecutionState.NAVIGATION_STARTED.value,
+                            "playback_verified": False,
+                        },
+                    )
+                else:
+                    base_url = "https://www.google.com/search?q="
+                    url = base_url + urllib.parse.quote_plus(query.strip())
+                    command = [resolved_executable]
+                    if arguments.get("new_tab"):
+                        command.append("--new-tab")
+                    command.append(url)
+                    subprocess.Popen(command, close_fds=True, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    message = f"Opened search for: {query.strip()}"
+                    return ToolResult(
+                        success=True,
+                        tool_name=self.name,
+                        message=message,
+                        data={
+                            "application": app_name_key,
+                            "url": url,
+                            "query": query.strip(),
+                            "media_state": MediaExecutionState.SEARCH_COMPLETED.value,
+                            "playback_verified": False,
+                        },
+                    )
 
             elif operation == "check":
                 available = self._resolve_executable(executable) is not None

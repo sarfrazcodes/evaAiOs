@@ -39,12 +39,16 @@ TEST_DB = os.path.join(os.path.dirname(__file__), "test_phase3b.db")
 @pytest.fixture(autouse=True)
 def isolated_db():
     """Redirect all DB access to a throw-away test database."""
+    orig_db = db_module.DB_PATH
+    orig_state_db = state_module.DB_PATH
     db_module.DB_PATH = TEST_DB
     state_module.DB_PATH = TEST_DB
     db_module.init_db()
     yield
     if os.path.exists(TEST_DB):
         os.remove(TEST_DB)
+    db_module.DB_PATH = orig_db
+    state_module.DB_PATH = orig_state_db
 
 
 client = TestClient(app)

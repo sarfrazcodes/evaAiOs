@@ -1,5 +1,7 @@
 import os
-from typing import Dict, Any
+import re
+from datetime import datetime, timezone
+from typing import Dict, Any, List
 from core.eva_core.tools.base import BaseTool
 from core.eva_core.protocol import ToolResult
 
@@ -7,7 +9,7 @@ WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../
 
 class FileTool(BaseTool):
     name = "file_tool"
-    description = "Handles minimal safe file operations within the designated workspace."
+    description = "Handles safe workspace file operations: create, read, edit, append, search, code generation, and inspection."
 
     def __init__(self):
         if not os.path.exists(WORKSPACE_ROOT):
@@ -30,11 +32,18 @@ class FileTool(BaseTool):
 
     def execute(self, arguments: Dict[str, Any]) -> ToolResult:
         operation = arguments.get("operation")
-        path = arguments.get("path")
+        path = arguments.get("path", "")
         content = arguments.get("content", "")
 
-        if not operation or not path:
-            return ToolResult(success=False, tool_name=self.name, message="Missing operation or path.", error="InvalidInput")
+        if not operation:
+            return ToolResult(success=False, tool_name=self.name, message="Missing operation.", error="InvalidInput")
+
+        # Allow search_files without explicit path (defaults to root)
+        if operation == "search_files" and not path:
+            path = "."
+
+        if not path and operation != "search_files":
+            return ToolResult(success=False, tool_name=self.name, message="Missing path.", error="InvalidInput")
 
         try:
             target_path = self._resolve_path(path)
@@ -43,9 +52,16 @@ class FileTool(BaseTool):
                 parent_path = os.path.realpath(os.path.dirname(target_path))
                 if os.path.commonpath((os.path.realpath(WORKSPACE_ROOT), parent_path)) != os.path.realpath(WORKSPACE_ROOT):
                     raise ValueError("File parent is outside the workspace.")
+                os.makedirs(parent_path, exist_ok=True)
                 with open(target_path, "w", encoding="utf-8") as f:
                     f.write(content)
-                return ToolResult(success=True, tool_name=self.name, message=f"Created file: {path}")
+                line_count = len(content.splitlines())
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"Created file: {path}",
+                    data={"path": path, "lines": line_count, "bytes": len(content.encode("utf-8"))}
+                )
 
             elif operation == "read_file":
                 if not os.path.exists(target_path):
@@ -53,6 +69,116 @@ class FileTool(BaseTool):
                 with open(target_path, "r", encoding="utf-8") as f:
                     file_content = f.read()
                 return ToolResult(success=True, tool_name=self.name, message=f"Read file: {path}", data={"content": file_content})
+
+            elif operation == "edit_file":
+                if not os.path.exists(target_path):
+                    return ToolResult(success=False, tool_name=self.name, message="File not found.", error="FileNotFound")
+                target = arguments.get("target")
+                replacement = arguments.get("replacement", arguments.get("content", ""))
+                with open(target_path, "r", encoding="utf-8") as f:
+                    existing = f.read()
+
+                if target is not None:
+                    if target not in existing:
+                        return ToolResult(success=False, tool_name=self.name, message=f"Target text not found in {path}", error="TargetNotFound")
+                    new_content = existing.replace(target, replacement, 1 if arguments.get("single_match", True) else -1)
+                else:
+                    new_content = replacement
+
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                lines = len(new_content.splitlines())
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"Successfully edited file: {path}",
+                    data={"path": path, "lines": lines, "bytes": len(new_content.encode("utf-8"))}
+                )
+
+            elif operation == "append_file":
+                parent_path = os.path.realpath(os.path.dirname(target_path))
+                os.makedirs(parent_path, exist_ok=True)
+                with open(target_path, "a", encoding="utf-8") as f:
+                    f.write(content)
+                with open(target_path, "r", encoding="utf-8") as f:
+                    total_lines = len(f.readlines())
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"Appended to file: {path}",
+                    data={"path": path, "lines": total_lines, "bytes_appended": len(content.encode("utf-8"))}
+                )
+
+            elif operation == "generate_code":
+                code = arguments.get("code", arguments.get("content", ""))
+                language = arguments.get("language", "text")
+                parent_path = os.path.realpath(os.path.dirname(target_path))
+                os.makedirs(parent_path, exist_ok=True)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(code)
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"Generated {language} code at: {path}",
+                    data={"path": path, "language": language, "lines": len(code.splitlines())}
+                )
+
+            elif operation == "search_files":
+                query = arguments.get("query", arguments.get("pattern", "")).lower()
+                results: List[Dict[str, Any]] = []
+                base_dir = target_path if os.path.isdir(target_path) else os.path.realpath(WORKSPACE_ROOT)
+                for root, _, files in os.walk(base_dir):
+                    for file in files:
+                        full = os.path.join(root, file)
+                        rel = os.path.relpath(full, os.path.realpath(WORKSPACE_ROOT))
+                        matched = False
+                        match_snippet = ""
+                        if not query or query in file.lower():
+                            matched = True
+                        else:
+                            try:
+                                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                                    for line_no, line in enumerate(f, 1):
+                                        if query in line.lower():
+                                            matched = True
+                                            match_snippet = line.strip()[:100]
+                                            break
+                            except Exception:
+                                pass
+                        if matched:
+                            results.append({"path": rel, "name": file, "snippet": match_snippet})
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"Found {len(results)} matches in workspace",
+                    data={"matches": results, "count": len(results)}
+                )
+
+            elif operation == "file_info":
+                if not os.path.exists(target_path):
+                    return ToolResult(success=False, tool_name=self.name, message="File not found.", error="FileNotFound")
+                stat = os.stat(target_path)
+                is_dir = os.path.isdir(target_path)
+                line_count = 0
+                if not is_dir:
+                    try:
+                        with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
+                            line_count = sum(1 for _ in f)
+                    except Exception:
+                        pass
+                return ToolResult(
+                    success=True,
+                    tool_name=self.name,
+                    message=f"File info for: {path}",
+                    data={
+                        "path": path,
+                        "is_dir": is_dir,
+                        "is_file": not is_dir,
+                        "size_bytes": stat.st_size,
+                        "line_count": line_count,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                    }
+                )
 
             elif operation == "list_directory":
                 if not os.path.exists(target_path) or not os.path.isdir(target_path):

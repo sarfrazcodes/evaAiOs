@@ -13,11 +13,14 @@ def normalize_input(text: str) -> str:
         return ""
     
     # 1. Lowercase
-    normalized = text.lower()
+    normalized = text.lower().strip()
+
+    # Strip sentence-ending punctuation like '.', '!', '?'
+    normalized = re.sub(r'[\.!?]+$', '', normalized).strip()
     
-    # 2. Remove punctuation (excluding hyphens/underscores which might be in app names, wait, the prompt says "normalize/remove surrounding punctuation")
-    # Let's just remove standard punctuation for safe exact matching
-    normalized = normalized.translate(str.maketrans('', '', string.punctuation))
+    # 2. Remove punctuation but preserve '.', '+', '-', '_' which occur in filenames and languages (e.g. dfs.cpp, c++)
+    punct_to_remove = ''.join(c for c in string.punctuation if c not in {'.', '+', '_', '-'})
+    normalized = normalized.translate(str.maketrans('', '', punct_to_remove))
     
     # 3. Normalize repeated whitespace
     normalized = re.sub(r'\s+', ' ', normalized).strip()

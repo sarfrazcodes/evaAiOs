@@ -1,3 +1,4 @@
+
 import re
 import difflib
 from typing import Optional, Dict, Any, Tuple
@@ -14,6 +15,20 @@ def _get_fuzzy_match(word: str, possibilities: list[str], cutoff=0.75) -> Option
 
 class IntentMatcher:
     def match(self, original_text: str) -> Optional[IntentModel]:
+        # Check personal identity & memory fast response first
+        try:
+            from core.eva_core.memory.personal_memory import get_personal_memory_manager
+            identity_resp = get_personal_memory_manager().get_identity_fast_response(original_text)
+            if identity_resp:
+                return IntentModel(
+                    intent="personal_identity",
+                    confidence=1.0,
+                    reason="Deterministic personal memory and identity retrieval",
+                    parameters={"fast_response": identity_resp},
+                )
+        except Exception:
+            pass
+
         text = normalize_input(original_text)
         if not text:
             return None
@@ -77,6 +92,61 @@ class IntentMatcher:
                 confidence=1.0,
                 reason="Deterministic file operation",
                 parameters={"operation": "read_file", "path": file_read_match.group(1).strip()},
+            )
+
+        # Contextual file creation inside active directory
+        context_file_match = re.fullmatch(
+            r"(?:inside it|in it|inside the folder|in that folder) (?:create|make|new) (?:a )?(?:file )?(?:called |named )?(.+)",
+            text,
+        )
+        if context_file_match:
+            filename = context_file_match.group(1).strip()
+            return IntentModel(
+                intent="file_operation",
+                confidence=1.0,
+                reason="Contextual file creation inside parent directory",
+                parameters={
+                    "operation": "create_file",
+                    "path": filename,
+                    "context_parent": True,
+                },
+            )
+
+        # Code implementation
+        implement_match = re.fullmatch(
+            r"(?:implement|code|write) (.+?)(?: in (c\+\+|cpp|c|python|py|java|javascript|js|rust|go))?",
+            text,
+        )
+        if implement_match and not text.startswith("write a short paragraph") and not text.startswith("write a paragraph") and not text.startswith("write about"):
+            algorithm = implement_match.group(1).strip()
+            lang = (implement_match.group(2) or "cpp").strip()
+            return IntentModel(
+                intent="file_operation",
+                confidence=1.0,
+                reason="Deterministic code implementation",
+                parameters={
+                    "operation": "generate_code",
+                    "target_file": "__context_file__",
+                    "algorithm": algorithm,
+                    "language": lang,
+                },
+            )
+
+        # Add comments
+        comments_match = re.fullmatch(
+            r"(?:add|include|insert) (?:explanatory )?comments(?: to it| to the file)?",
+            text,
+        )
+        if comments_match:
+            return IntentModel(
+                intent="file_operation",
+                confidence=1.0,
+                reason="Deterministic code commenting",
+                parameters={
+                    "operation": "edit_file",
+                    "action": "add_comments",
+                    "target_file": "__context_file__",
+                },
             )
 
         if text in {"close it", "quit it", "exit it", "close that", "close the same application"}:

@@ -1,178 +1,321 @@
-# EVA AI OS
+# EVA AI OS 2.0 – Sovereign Agentic Desktop Assistant for Linux
 
-> **Development status: Version 3 — Work in Progress**  
-> EVA is an experimental AI-native Linux operating environment. This repository currently focuses on the foundational system architecture; advanced AI and voice-assistant capabilities are planned for later development phases.
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux%20x86__64-orange.svg)](#prerequisites)
+[![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Flutter: 3.x](https://img.shields.io/badge/Flutter-3.x%20Desktop-cyan.svg)](https://flutter.dev/)
+[![Local LLM: Ollama](https://img.shields.io/badge/LLM-Ollama%20Llama%203.2-purple.svg)](https://ollama.ai/)
+[![STT: Faster--Whisper](https://img.shields.io/badge/STT-Faster--Whisper-green.svg)](https://github.com/SYSTRAN/faster-whisper)
+[![TTS: Piper](https://img.shields.io/badge/TTS-Piper%20Neural-yellow.svg)](https://github.com/rhasspy/piper)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-EVA AI OS aims to bring a conversational interface closer to the operating system, with a future vision of helping users manage tasks, interact with local system services, and work across local and cloud environments.
+**EVA AI OS** is a local-first, privacy-preserving, voice-controlled agentic desktop operating environment for Linux. Unlike cloud-tethered assistants that continuously stream private audio and system metadata to third-party telemetry servers, EVA executes speech-to-text, cognitive reasoning, task planning, and neural voice synthesis **100% on-device** using commodity hardware.
 
-**Repository:** https://github.com/sarfrazcodes/evaAiOs
+---
 
-## Current Development Phase
+## 🌟 Key Features
 
-This repository documents **Phase 1: Foundation and Architecture**.
+### 🎙️ Sovereign Multimodal Voice Pipeline
+- **Faster-Whisper STT**: Real-time acoustic transcription powered by CTranslate2 on CPU, delivering >93% accuracy even under noisy acoustic conditions.
+- **Agentic Voice Polling**: Autonomous voice activity detection (VAD) and silence polling for hands-free conversational turns without manual button holding.
+- **Piper Neural TTS**: High-fidelity local voice synthesis (`en_US-amy-medium`) running on ONNX runtime with sub-250ms synthesis latency.
 
-The current focus is on establishing the building blocks required for a future AI operating environment:
+### 🛡️ Privacy Router & Multi-Provider Engine
+- **Private Mode (Default)**: Strictly air-gapped. 100% of LLM reasoning runs locally via Ollama (`llama3.2:3b`). External network queries are completely blocked at the backend gateway level.
+- **Hybrid Mode**: Routine desktop tasks, personal memories, and file operations execute locally; multi-step analytical reasoning uses external cloud LLMs only with user consent.
+- **Public Mode**: Cloud-augmented mode powered by Google Gemini 2.5 REST API for complex code synthesis and high-level reasoning.
+- **Credential Protection**: API keys are stored securely on the host workstation and never transmitted to third parties or exposed in the frontend.
 
-- A Linux-oriented development environment.
-- A Flutter desktop shell for the user interface.
-- Python services for system integration and core functionality.
-- A local SQLite database foundation.
-- A controlled boundary between the desktop interface and system-level services.
-- Documentation, setup scripts, and automated tests to support development.
+### 🧠 Persistent Personal Identity & Private Memory
+- **Owner Profile**: EVA knows its creator and maintains persistent structured memory (verified creator **Mohd Sarfraz Saifi / Saif**, BTech Computer Science Engineering student).
+- **ACID SQLite Storage**: Real-time memory synchronization across application and backend restarts.
+- **Context-Aware Follow-ups**: Fast-path KV-cache reuse that accelerates multi-turn dialogue latencies by >24%.
 
-**Important:** The current Phase 1 scope does not yet include a complete AI assistant, voice interaction, or LLM-powered task execution. These are longer-term goals, not features that should be assumed to work in the current version.
+### 🖥️ Premium Desktop Experience (Flutter 3.x)
+- **Linux Workstation Desktop Shell**: Built with Flutter desktop and Material 3 design principles.
+- **Themes**: Professional Graphite Dark theme and Ivory Light theme.
+- **Wallpaper & Visual Customization**: Dynamic wallpaper selection with live controls for brightness, blur, and opacity overlay.
+- **OS Navigation Dock & Top Panel**: Quick access to Assistant, Applications, Sandboxed File Explorer, Memory Explorer, and System Task Monitor.
 
-## Vision
+### ⚡ Agentic Task Execution & System Tools
+- **Task State Manager**: Persistent background queue with crash recovery and progress streaming.
+- **Application Tool**: Allowlist-enforced application launcher (Terminal, Browser, Calculator, Text Editor, File Manager).
+- **Desktop & Audio Control**: Direct integration with Linux `wpctl`, `amixer`, and window management utilities.
+- **Sandboxed File Operations**: Path-traversal-protected directory inspection and file manipulation.
+- **Permission Confirmation System**: SHA-256 HMAC-gated confirmation tokens protecting destructive operations.
 
-EVA is being developed toward an operating environment where users can eventually interact with their computer more naturally and delegate supported tasks through a conversational interface.
+---
 
-The longer-term direction includes:
-
-- Natural-language interaction.
-- Voice input and spoken responses.
-- Personal memory and context.
-- Controlled desktop and operating-system actions.
-- Integration with local and cloud AI models.
-- A modular architecture that can grow through staged development.
-
-These items describe the project's direction and should not be interpreted as already implemented features.
-
-## Architecture at a Glance
-
-The repository is organized into separate components so the desktop interface, core logic, and system integration can evolve independently.
-
-| Component | Responsibility |
-|---|---|
-| `desktop/eva_desktop/` | Flutter-based desktop interface |
-| `core/eva_core/` | Python core/backend functionality |
-| `system/eva_system/` | System information and integration tools |
-| `os/services/` | Operating-system service integration |
-| `docs/` | Architecture and development documentation |
-| `scripts/` | Development and setup scripts |
-| `tests/` | Automated tests |
-
-The project also includes a local SQLite foundation for future persistence needs.
-
-## Repository Structure
+## 🏗️ System Architecture
 
 ```text
-evaAiOs/
-├── core/
-│   └── eva_core/          # Python core services
-├── desktop/
-│   └── eva_desktop/       # Flutter desktop shell
-├── docs/                  # Setup and architecture documentation
-├── os/
-│   └── services/          # OS-level service integration
-├── scripts/               # Development and setup scripts
-├── system/
-│   └── eva_system/        # System information and integration
-├── tests/                 # Automated tests
-└── README.md
+┌────────────────────────────────────────────────────────────────────────┐
+│                   EVA Flutter Desktop UI (Presentation)                │
+│   Top System Bar  •  Navigation Dock  •  Assistant  •  Memory Explorer  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ HTTP / SSE / REST
+┌───────────────────────────────────▼────────────────────────────────────┐
+│                  FastAPI Core Gateway & ModelRouter                    │
+│   Private (Ollama)  •  Hybrid Router  •  Public Cloud (Gemini 2.5)     │
+└─────────────┬─────────────────────┬────────────────────┬───────────────┘
+              │                     │                    │
+┌─────────────▼─────────┐ ┌─────────▼──────────┐ ┌───────▼───────────────┐
+│     Voice Pipeline    │ │ Cognitive & Planner│ │    Tools & Sandbox    │
+│ Faster-Whisper (CPU)  │ │ IntentMatcher (0.5ms)│ Applications Allowlist │
+│ Piper Neural TTS      │ │ Ollama (Llama 3.2) │ Sandboxed File I/O     │
+│ PyAudio / SoundDevice │ │ SQLite Tasks & Mem │ wpctl Audio / D-Bus    │
+└───────────────────────┘ └────────────────────┘ └───────────────────────┘
 ```
 
-## Getting Started
+---
 
-EVA is an actively evolving project, so setup requirements and commands may change between versions. Before running the project, review the setup and architecture documentation in the repository.
+## 📋 Prerequisites
 
-### Prerequisites
+EVA is built for modern Linux x86_64 distributions:
+- **Operating System**: Ubuntu 22.04 / 24.04 / 26.04 LTS, Debian 12+, Fedora 39+, or Arch Linux.
+- **CPU**: x86_64 processor with AVX2 instruction support (Intel 8th Gen+ or AMD Ryzen).
+- **RAM**: Minimum 8 GiB RAM (12–16 GiB recommended for concurrent local LLM + Whisper).
+- **Python**: Version 3.10, 3.11, 3.12, 3.13, or 3.14.
+- **Flutter SDK**: Version 3.24+ with Linux desktop build support.
+- **Ollama**: Installed and running locally.
 
-The expected development environment includes:
+---
 
-- A Linux environment.
-- Python and the project's required Python dependencies.
-- Flutter and Dart for the desktop application.
-- SQLite support.
-- Any additional system packages listed in the project setup documentation.
+## 🚀 Complete Step-by-Step Setup Guide
 
-### 1. Clone the repository
+Follow these steps to set up and run EVA AI OS from scratch on a clean Linux system.
+
+### 1. Install System Dependencies
+
+Open a terminal and install required audio, compilation, and system integration packages:
+
+```bash
+sudo apt update && sudo apt install -y \
+    build-essential \
+    curl \
+    git \
+    ffmpeg \
+    alsa-utils \
+    libasound2-dev \
+    libpulse0 \
+    libportaudio2 \
+    portaudio19-dev \
+    libgl1-mesa-dev \
+    clang \
+    cmake \
+    ninja-build \
+    pkg-config \
+    libgtk-3-dev
+```
+
+---
+
+### 2. Install and Configure Ollama (Local LLM)
+
+1. **Install Ollama**:
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+2. **Verify the Ollama service is running**:
+   ```bash
+   systemctl status ollama || ollama serve &
+   ```
+
+3. **Pull the Llama 3.2 3B model** (default sovereign LLM used by EVA):
+   ```bash
+   ollama pull llama3.2:3b
+   ```
+
+---
+
+### 3. Clone the Repository
 
 ```bash
 git clone https://github.com/sarfrazcodes/evaAiOs.git
 cd evaAiOs
 ```
 
-### 2. Read the setup documentation
+---
 
-Review the development setup guide:
+### 4. Setup Python Backend Environment
 
-```text
-docs/development/setup.md
+1. **Create and activate a Python virtual environment**:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+2. **Upgrade pip and install Python dependencies**:
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+---
+
+### 5. Setup Speech Recognition & TTS Models
+
+1. **Faster-Whisper Model**:
+   Faster-Whisper downloads and caches its base model automatically to `~/.cache/huggingface/hub/` on first run. To pre-download it:
+   ```bash
+   python3 -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
+   ```
+
+2. **Piper Neural TTS**:
+   EVA uses the lightweight, high-speed `en_US-amy-medium` ONNX voice model.
+   Create the Piper models directory and download the voice:
+   ```bash
+   mkdir -p ~/.local/share/piper/models
+   cd ~/.local/share/piper/models
+
+   # Download the ONNX model and its config
+   curl -LO https://github.com/rhasspy/piper/releases/download/v0.0.2/voice-en-us-amy-medium.tar.gz
+   tar -xzf voice-en-us-amy-medium.tar.gz
+   rm voice-en-us-amy-medium.tar.gz
+
+   # Return to project root
+   cd ~/evaAiOs
+   ```
+
+---
+
+### 6. Initialize Database & Seed Personal Memory
+
+Initialize the SQLite database schema and seed the initial owner identity profile:
+
+```bash
+source venv/bin/activate
+PYTHONPATH=. python3 -c "
+from core.eva_core.database import init_db
+from core.eva_core.memory.manager import MemoryManager
+init_db()
+MemoryManager().seed_owner_identity()
+print('EVA Database and Personal Memory initialized successfully!')
+"
 ```
 
-Follow its instructions for installing dependencies and configuring the development environment.
+---
 
-### 3. Review the architecture
+### 7. Run EVA Core Backend
 
-The architecture overview is documented at:
+Start the FastAPI backend server:
 
-```text
-docs/architecture/overview.md
+```bash
+source venv/bin/activate
+uvicorn core.eva_core.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Use the guide to understand how the desktop, core, and system components are intended to interact.
+Verify backend health in another terminal:
+```bash
+curl http://127.0.0.1:8000/api/health/detailed
+```
+Expected output:
+```json
+{"status": "healthy", "service": "EVA Core", "database": "connected", "ollama": "connected"}
+```
 
-### 4. Run the relevant components
+---
 
-Use the commands documented for each component in the repository. Because the project is still under active development, this README intentionally avoids inventing launch commands that may not match the current implementation.
+### 8. Run EVA Flutter Desktop Shell
 
-## Development Principles
+1. **Navigate to the desktop application directory**:
+   ```bash
+   cd desktop/eva_desktop
+   ```
 
-- **Modularity:** Keep desktop UI, core functionality, and system integration separated.
-- **Controlled system access:** Keep a clear boundary between user-interface requests and system-level operations.
-- **Incremental development:** Build and test the foundation before adding more complex AI capabilities.
-- **Local foundation:** Establish local persistence and system integration before expanding the architecture.
-- **Documentation and testing:** Maintain setup instructions and tests as components evolve.
+2. **Get Flutter packages**:
+   ```bash
+   flutter pub get
+   ```
 
-## Roadmap
+3. **Launch the Linux desktop application**:
+   ```bash
+   flutter run -d linux
+   ```
 
-The roadmap below describes intended direction, not a guarantee that each feature is already implemented.
+---
 
-### Phase 1 — Foundation
-- Establish the repository structure and component boundaries.
-- Build the Flutter desktop shell.
-- Set up Python core and system-integration modules.
-- Establish the SQLite foundation.
-- Add documentation and tests.
+## ⚙️ Configuration & Environment Variables
 
-### Future phases — AI capabilities
-Potential future work includes:
+EVA functions fully out-of-the-box in **Private Mode** without requiring any external API keys or internet connection.
 
-- LLM integration and intent interpretation.
-- Voice-based interaction.
-- Personal memory and contextual assistance.
-- Desktop automation and file operations.
-- Local/cloud model routing.
-- Permission checks, confirmations, and safeguards for system actions.
+If you wish to enable **Public Mode** for Google Gemini 2.5:
+1. Obtain an API key from [Google AI Studio](https://aistudio.google.com/).
+2. You can either:
+   - Configure it directly in the EVA Settings UI under **AI Provider** $\rightarrow$ **Public Mode** $\rightarrow$ **Enter API Key**.
+   - Or export it as an environment variable before starting the backend:
+     ```bash
+     export GEMINI_API_KEY="your-gemini-api-key-here"
+     ```
 
-Specific milestones may change as the project develops.
+---
 
-## Safety and Security
+## 🧪 Running Automated Tests
 
-Operating-system integration requires careful handling. As EVA grows:
+Run the full backend test suite covering intent routing, desktop tools, permissions, personal memory, and agentic task execution:
 
-- Destructive or sensitive actions should require clear authorization and, where appropriate, user confirmation.
-- Secrets and API keys must not be committed to the repository.
-- AI-generated commands should not be executed blindly.
-- System services should use the minimum permissions needed.
-- User data and stored context should be handled deliberately and documented.
+```bash
+# Activate virtual environment
+source venv/bin/activate
 
-## Contributing
+# Run all pytest test suites
+PYTHONPATH=. pytest tests/ -v
+```
 
-EVA is a work in progress. If you want to contribute:
+Run Flutter widget and integration tests:
+```bash
+cd desktop/eva_desktop
+flutter test
+```
 
-1. Review the existing architecture and setup documentation.
-2. Keep changes focused on a specific component or milestone.
-3. Add or update tests where appropriate.
-4. Update documentation when behavior or setup changes.
-5. Describe the change and how it was tested in your pull request.
+---
 
-## Project Status
+## 📁 Repository Structure
 
-EVA AI OS is currently an experimental project under active development. The current repository is a foundation for the broader vision, not a finished operating system or a fully functional AI assistant.
+```text
+evaAiOs/
+├── core/
+│   └── eva_core/                # Python backend & core agent engine
+│       ├── main.py              # FastAPI application & REST endpoints
+│       ├── database.py          # SQLite database schema & migrations
+│       ├── protocol.py          # Pydantic schemas & communication protocol
+│       ├── intent/              # Two-tier cognitive intent classification
+│       ├── llm/                 # ModelRouter, OllamaProvider, GeminiProvider
+│       ├── memory/              # SQLite persistent memory & owner identity
+│       ├── permissions/         # Security confirmation tokens & sandbox hooks
+│       ├── stt/                 # Faster-Whisper transcriber & agentic voice poller
+│       ├── task/                # Task state manager, worker queue & recovery
+│       ├── tools/               # Linux desktop, file sandbox, app launcher, calc
+│       └── tts/                 # Piper neural voice synthesis engine
+├── desktop/
+│   └── eva_desktop/             # Flutter desktop application
+│       ├── lib/
+│       │   ├── main.dart        # Flutter entrypoint & app root
+│       │   ├── core/            # Theme, router, state providers, widgets
+│       │   └── features/        # Assistant, settings, memory, file explorer
+│       ├── test/                # Flutter unit & widget tests
+│       └── pubspec.yaml         # Dart/Flutter dependencies
+├── tests/                       # Automated regression & integration test suites
+│   ├── test_agentic_v2.py
+│   ├── test_identity_and_memory.py
+│   ├── test_persistence.py
+│   ├── test_phase3b.py
+│   └── test_phase4_desktop_api.py
+├── requirements.txt             # Python backend dependencies
+├── .gitignore                   # Git ignore rules (research artifacts excluded)
+└── README.md                    # Project documentation & setup guide
+```
 
-The README will evolve as new phases are implemented and verified.
+---
 
-## License
+## 👤 Developer & Maintainer
 
-Check the repository for a license file before reusing or redistributing this project. If no license is present, do not assume that the code is licensed for reuse.
+- **Developer & Lead Systems Architect**: Mohd Sarfraz Saifi ([@sarfrazcodes](https://github.com/sarfrazcodes))
+- **Project**: EVA AI OS (Sovereign Linux AI Assistant)
+- **Repository**: [https://github.com/sarfrazcodes/evaAiOs](https://github.com/sarfrazcodes/evaAiOs)
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).

@@ -20,3 +20,15 @@ build/
 # IDE
 .vscode/
 .idea/
+
+# Research & Academic Evaluation Artifacts (Preserved locally for research paper)
+EVA_RESEARCH_EVALUATION/
+scratch/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.docx
+*.xlsx
+*.zip

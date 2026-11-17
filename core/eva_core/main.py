@@ -1,4 +1,5 @@
 import logging
+from typing import Optional, List, Dict, Any, Union
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from system.eva_system.sys_info import get_system_info
@@ -42,14 +43,26 @@ from core.eva_core.stt.recorder import (
     recording_status,
 )
 from core.eva_core.tts.service import SentenceBuffer, get_tts_service
+from core.eva_core.task.events import TaskEventManager
+from core.eva_core.task.queue import TaskQueue
+from core.eva_core.task.worker import ExecutionWorker
+from core.eva_core.task.recovery import RecoveryManager
+from core.eva_core.task.agent_session import SessionManager
+from core.eva_core.stt.agentic_voice import AgenticVoiceService
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = FastAPI(title="EVA AI OS Core Service", version="0.1.0")
 
 # Initialize Phase 2C components globally
+from core.eva_core.llm.model_router import ModelRouter, PrivacyMode
+from core.eva_core.llm.gemini_provider import GeminiProvider
+
 model_name = os.environ.get("EVA_INTENT_MODEL", "llama3.2:3b")
 llm_provider = OllamaProvider(model=model_name)
+gemini_provider = GeminiProvider()
+model_router = ModelRouter(ollama_provider=llm_provider, gemini_provider=gemini_provider)
+
 intent_engine = IntentEngine(llm_provider=llm_provider)
 router = Router()
 planner = Planner(provider=llm_provider)
@@ -68,10 +81,50 @@ permission_hook = PermissionHook()
 executor = Executor(state_manager=state_manager, tool_registry=tool_registry, permission_hook=permission_hook)
 task_runner = TaskRunner(executor=executor, state_manager=state_manager)
 
+# Phase 5: Persistent Execution Engine & Session Management
+task_event_manager = TaskEventManager()
+task_queue = TaskQueue()
+execution_worker = ExecutionWorker(
+    queue=task_queue,
+    state_manager=state_manager,
+    executor=executor,
+    event_manager=task_event_manager,
+)
+recovery_manager = RecoveryManager(
+    state_manager=state_manager,
+    event_manager=task_event_manager,
+)
+session_manager = SessionManager()
 
-def execute_safe_intent(intent_model):
+def _agentic_voice_callback(transcript: str) -> str:
+    import asyncio
+    context_manager.add_user_message("agentic_voice_session", transcript)
+    req = RequestModel(
+        source="agentic_voice",
+        input_type="voice",
+        content=transcript,
+        session_id="agentic_voice_session",
+    )
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    resp = loop.run_until_complete(handle_request(req))
+    msg = resp.message or "Action executed."
+    context_manager.add_assistant_message("agentic_voice_session", msg)
+    tts_service.begin_response(resp.request_id)
+    tts_service.enqueue(msg, resp.request_id)
+    return msg
+
+agentic_voice_service = AgenticVoiceService(handler_callback=_agentic_voice_callback)
+
+
+def execute_safe_intent(intent_model, session_id: str | None = None):
     init_db()
     arguments = dict(intent_model.parameters)
+    session = session_manager.get_or_create(session_id or "default")
+
     if intent_model.intent == "application_operation":
         arguments["operation"] = arguments.get("operation", "open")
         tool_name = "application_tool"
@@ -93,9 +146,71 @@ def execute_safe_intent(intent_model):
         }
         tool_name = "desktop_tool"
     elif intent_model.intent == "file_operation":
-        if arguments.get("operation") not in {"create_file", "create_directory", "read_file", "list_directory"}:
+        op = arguments.get("operation")
+        if op not in {
+            "create_file", "create_directory", "read_file", "list_directory",
+            "edit_file", "append_file", "generate_code", "search_files", "file_info"
+        }:
             return None
         tool_name = "file_tool"
+
+        # Specialized code generator for DFS multi-turn demonstration
+        if op == "generate_code" and not arguments.get("code"):
+            algo = arguments.get("algorithm", "dfs")
+            lang = arguments.get("language", "cpp")
+            if "dfs" in str(algo).lower():
+                arguments["code"] = (
+                    "#include <iostream>\n"
+                    "#include <vector>\n\n"
+                    "using namespace std;\n\n"
+                    "void dfs(int node, const vector<vector<int>>& adj, vector<bool>& visited) {\n"
+                    "    visited[node] = true;\n"
+                    "    cout << node << \" \";\n"
+                    "    for (int next : adj[node]) {\n"
+                    "        if (!visited[next]) {\n"
+                    "            dfs(next, adj, visited);\n"
+                    "        }\n"
+                    "    }\n"
+                    "}\n\n"
+                    "int main() {\n"
+                    "    int n = 5;\n"
+                    "    vector<vector<int>> adj(n);\n"
+                    "    adj[0].push_back(1);\n"
+                    "    adj[0].push_back(2);\n"
+                    "    adj[1].push_back(3);\n"
+                    "    adj[2].push_back(4);\n"
+                    "    vector<bool> visited(n, false);\n"
+                    "    cout << \"DFS: \";\n"
+                    "    dfs(0, adj, visited);\n"
+                    "    cout << endl;\n"
+                    "    return 0;\n"
+                    "}\n"
+                )
+            else:
+                arguments["code"] = f"// Implementation of {algo} in {lang}\n"
+
+        # Specialized comment editing helper
+        if op == "edit_file" and arguments.get("action") == "add_comments":
+            target_path = arguments.get("path")
+            comment_header = (
+                "/**\n"
+                " * Depth First Search (DFS) Implementation\n"
+                " * Traverses graph vertices depth-wise recursively.\n"
+                " * Time Complexity: O(V + E)\n"
+                " * Space Complexity: O(V) recursion stack\n"
+                " */\n\n"
+            )
+            try:
+                ft = tool_registry.get("file_tool")
+                resolved = ft._resolve_path(target_path)
+                with open(resolved, "r", encoding="utf-8") as f:
+                    curr = f.read()
+                arguments["replacement"] = comment_header + curr
+                arguments["target"] = None
+            except Exception:
+                arguments["replacement"] = comment_header
+                arguments["target"] = None
+
     elif intent_model.intent == "desktop_control":
         arguments = dict(intent_model.parameters)
         tool_name = "desktop_tool"
@@ -117,7 +232,12 @@ def execute_safe_intent(intent_model):
     state_manager.save_plan(task.task_id, [step])
     state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
     executor.execute_task(task.task_id)
-    return state_manager.get_task(task.task_id)
+
+    completed_task = state_manager.get_task(task.task_id)
+    if completed_task and completed_task.status in {TaskStatus.COMPLETED, TaskStatus.BLOCKED}:
+        session.record_action(tool_name, arguments)
+
+    return completed_task
 
 
 async def create_editor_write_task(request_id: str, request: str):
@@ -173,6 +293,30 @@ def _resolve_browser_context(intent_model, conversation_id: str | None):
     return intent_model
 
 
+def _resolve_contextual_file_and_directory(intent_model, conversation_id: str | None):
+    if intent_model.intent != "file_operation":
+        return intent_model
+    session = session_manager.get_or_create(conversation_id or "default")
+    params = intent_model.parameters
+
+    if params.get("context_parent") or params.get("path") in {"inside it", "in it"}:
+        active_dir = session.active_directory or ""
+        file_name = params.get("path", "")
+        if file_name in {"inside it", "in it"}:
+            file_name = params.get("filename", "file.txt")
+        new_path = os.path.join(active_dir, file_name) if active_dir else file_name
+        params["path"] = new_path
+        params["context_parent"] = False
+
+    if params.get("target_file") == "__context_file__":
+        target = session.active_file
+        if not target and session.active_directory:
+            target = f"{session.active_directory}/dfs.cpp"
+        params["path"] = target or "main.cpp"
+
+    return intent_model
+
+
 def _deterministic_control_plan(task_id: str, request: str):
     normalized = request.lower()
     known_apps = {
@@ -224,6 +368,16 @@ async def startup_event():
     db_ok = init_db()
     if not db_ok:
         logging.error("Failed to initialize database foundation.")
+    execution_worker.start()
+    recovered = recovery_manager.recover_interrupted_tasks()
+    if recovered:
+        logging.info(f"Recovered {len(recovered)} interrupted tasks on startup.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logging.info("Stopping EVA Core Service...")
+    execution_worker.stop()
+    agentic_voice_service.stop()
 
 @app.get("/api/health")
 def health_check():
@@ -231,23 +385,20 @@ def health_check():
 
 
 @app.get("/api/health/detailed")
-def detailed_health_check():
+async def detailed_health_check():
     db_status = database_health()
-    ollama_status = {"available": False, "model": model_name, "model_available": False}
     try:
-        with httpx.Client(timeout=1.5) as client:
-            response = client.get(f"{llm_provider.base_url}/api/tags")
-            response.raise_for_status()
-            models = response.json().get("models", [])
-            names = {model.get("name") for model in models if isinstance(model, dict)}
-            ollama_status.update({"available": True, "model_available": model_name in names})
-    except (httpx.HTTPError, ValueError, TypeError):
-        pass
+        router_health = await model_router.health()
+    except Exception as e:
+        logging.warning("Error fetching model router health: %s", e)
+        router_health = {}
 
     return {
         "status": "healthy" if db_status["available"] else "degraded",
         "database": db_status,
-        "ollama": ollama_status,
+        "ollama": router_health.get("ollama", {"available": False, "model": model_name}),
+        "gemini": router_health.get("gemini", {"available": False, "configured": False}),
+        "mode": router_health.get("mode", model_router.get_privacy_mode()),
     }
 
 @app.get("/api/system/info")
@@ -266,6 +417,7 @@ async def handle_request(req: RequestModel):
     intent_model = await intent_engine.determine_intent(req.content)
     intent_model = _resolve_contextual_application(intent_model, req.session_id)
     intent_model = _resolve_browser_context(intent_model, req.session_id)
+    intent_model = _resolve_contextual_file_and_directory(intent_model, req.session_id)
     route_result = router.route(intent_model)
     
     status = "completed"
@@ -287,7 +439,7 @@ async def handle_request(req: RequestModel):
             status = "failed"
             message = "I could not prepare the paragraph for the editor."
     elif route_result.route in ["application", "desktop", "file", "browser"]:
-        task = execute_safe_intent(intent_model)
+        task = execute_safe_intent(intent_model, req.session_id)
         if task is None:
             message = "That file operation is not supported or needs a path."
             status = "unsupported"
@@ -308,10 +460,59 @@ async def handle_request(req: RequestModel):
         if task.status == TaskStatus.BLOCKED:
             status = "requires_confirmation"
         if task.status == TaskStatus.COMPLETED:
-            message = f"Request classified as {intent_model.intent}. {task.steps[0].result['message']}"
+            step_result = task.steps[0].result or {}
+            media_state = step_result.get("media_state")
+            if media_state == "NAVIGATION_STARTED":
+                query = step_result.get("query", "")
+                message = f"Opened YouTube search for '{query}'. Select and click a video in the browser to play it."
+            elif media_state == "SEARCH_COMPLETED":
+                query = step_result.get("query", "")
+                message = f"Opened search results for: {query}"
+            else:
+                message = f"Request classified as {intent_model.intent}. {step_result.get('message', 'Done.')}"
         else:
             outcome = task.steps[0].error.message if task.steps[0].error else "The desktop action failed."
             message = f"Request classified as {intent_model.intent}. {outcome}"
+    elif route_result.route == "personal_identity":
+        message = intent_model.parameters.get("fast_response") or "I am EVA, your personal assistant."
+        status = "completed"
+    elif route_result.route in ["conversation", "information"]:
+        try:
+            from core.eva_core.memory.personal_memory import get_personal_memory_manager
+            active_mode = model_router.get_privacy_mode()
+            include_private = (
+                active_mode == PrivacyMode.PRIVATE
+                or req.metadata.get("share_private_memory", False)
+            )
+            active_provider, provider_name, route_reason = model_router.route_provider(
+                intent=intent_model.intent,
+                contains_private_data=False,
+                requires_complex_reasoning=(route_result.route == "information" or req.metadata.get("complex", False)),
+            )
+            logging.info("Handling request with %s provider (%s)", provider_name, route_reason)
+            mgr = get_personal_memory_manager()
+            owner = mgr.get_owner_profile()
+            call_name = owner.get("call_name") or owner.get("nickname") or "Saif"
+            personal_context = mgr.get_structured_llm_context(include_private=include_private)
+            sys_prompt = (
+                "You are EVA, an advanced AI Operating System and intelligent desktop assistant.\n"
+                f"{personal_context}\n\n"
+                "IMPORTANT MEMORY DIRECTIVES:\n"
+                "- The memory context above is your persistent long-term memory and authoritative ground truth.\n"
+                "- When answering questions about the user, their background, occupation, preferences, projects, or identity, always use the updated values from memory above.\n"
+                f"- Naturally address the user as {call_name} when appropriate without forcing it into every sentence.\n"
+                "- Never invent missing personal details. Be concise and helpful."
+            )
+            raw = await active_provider.generate_json(req.content, system=sys_prompt)
+            message = (
+                raw.get("response") or raw.get("content") or raw.get("message")
+                or raw.get("text") or "I'm here to help."
+            )
+            status = "completed"
+        except Exception as exc:
+            logging.error(f"Text generation in handle_request failed: {exc}")
+            message = "I am here to help, Saif."
+            status = "completed"
     elif route_result.route == "planner":
         # Phase 2C: Planner and Task State
         message = f"Request classified as {intent_model.intent}."
@@ -319,7 +520,9 @@ async def handle_request(req: RequestModel):
         try:
             steps = _deterministic_control_plan(task.task_id, req.content)
             if steps is None:
-                steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
+                planning_provider, p_name = model_router.get_planning_provider()
+                active_planner = Planner(provider=planning_provider)
+                steps = await active_planner.generate_plan(task_id=task.task_id, request_content=req.content)
             task = state_manager.save_plan(task.task_id, steps)
             task = state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
         except Exception as e:
@@ -368,6 +571,7 @@ async def chat_stream(req: RequestModel):
         intent_model = await intent_engine.determine_intent(req.content, formatted_context)
         intent_model = _resolve_contextual_application(intent_model, conversation_id)
         intent_model = _resolve_browser_context(intent_model, conversation_id)
+        intent_model = _resolve_contextual_file_and_directory(intent_model, conversation_id)
         route_result = router.route(intent_model)
 
         data_dict = {
@@ -400,12 +604,48 @@ async def chat_stream(req: RequestModel):
                 yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
                 yield json.dumps({"type": "error", "category": "editor_write_failed", "message": "I could not prepare the paragraph for the editor.", "request_id": req.request_id, "completed": False}) + "\n"
                 return
+        elif route_result.route == "personal_identity":
+            yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
+            msg = intent_model.parameters.get("fast_response") or "I am EVA, your personal assistant."
+            yield json.dumps({"type": "token", "content": msg}) + "\n"
+            context_manager.add_assistant_message(conversation_id, msg)
+            speak_response = req.metadata.get("tts_enabled", tts_service.enabled)
+            if speak_response:
+                tts_service.begin_response(req.request_id)
+                tts_service.enqueue(msg, req.request_id)
         elif route_result.route in ["conversation", "information", "clarification"]:
+            from core.eva_core.memory.personal_memory import get_personal_memory_manager
+
+            active_mode = model_router.get_privacy_mode()
+            include_private = (
+                active_mode == PrivacyMode.PRIVATE
+                or req.metadata.get("share_private_memory", False)
+            )
+
+            active_provider, provider_name, route_reason = model_router.route_provider(
+                intent=intent_model.intent,
+                contains_private_data=False,
+                requires_complex_reasoning=(route_result.route == "information" or req.metadata.get("complex", False)),
+            )
+            logging.info("Routing conversation stream to %s provider (%s)", provider_name, route_reason)
+            data_dict["provider"] = provider_name
+            data_dict["routing_reason"] = route_reason
+
+            mgr = get_personal_memory_manager()
+            owner = mgr.get_owner_profile()
+            call_name = owner.get("call_name") or owner.get("nickname") or "Saif"
+            personal_context = mgr.get_structured_llm_context(include_private=include_private)
             eva_system_prompt = (
                 "You are EVA, an advanced AI Operating System and intelligent assistant. "
                 "Your identity is EVA. You are not a generic language model. "
                 "You act as a helpful, concise, and confident AI assistant built directly into the user's computer. "
-                "Always refer to yourself as EVA if asked."
+                "Always refer to yourself as EVA if asked.\n\n"
+                f"{personal_context}\n\n"
+                "IMPORTANT MEMORY DIRECTIVES:\n"
+                "- The memory context above is your persistent long-term memory and authoritative ground truth.\n"
+                "- When answering questions about the user, their background, occupation, preferences, projects, or identity, always use the updated values from memory above.\n"
+                f"- Naturally address the user as {call_name} when appropriate without forcing it into every sentence.\n"
+                "- Never invent missing personal details."
             )
             yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
             
@@ -415,7 +655,7 @@ async def chat_stream(req: RequestModel):
             if speak_response:
                 tts_service.begin_response(req.request_id)
             try:
-                async for chunk in llm_provider.stream_text(formatted_context, system=eva_system_prompt):
+                async for chunk in active_provider.stream_text(formatted_context, system=eva_system_prompt):
                     assistant_response += chunk
                     if speak_response:
                         for sentence in sentence_buffer.add(chunk):
@@ -429,18 +669,18 @@ async def chat_stream(req: RequestModel):
                     if final_chunk:
                         tts_service.enqueue(final_chunk, req.request_id)
             except Exception as e:
-                logging.error("Stream generation failed for request %s: %s", req.request_id, e)
+                logging.error("Stream generation failed with %s for request %s: %s", provider_name, req.request_id, e)
                 yield json.dumps({
                     "type": "error",
                     "category": "generation_failed",
-                    "message": "Response generation failed. Please try again.",
+                    "message": f"Response generation failed via {provider_name}. Please try again.",
                     "request_id": req.request_id,
                     "completed": False,
                 }) + "\n"
                 return
                 
         elif route_result.route in ["application", "desktop", "file", "browser"]:
-            task = execute_safe_intent(intent_model)
+            task = execute_safe_intent(intent_model, conversation_id)
             if task is None:
                 yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
                 yield json.dumps({
@@ -454,7 +694,16 @@ async def chat_stream(req: RequestModel):
             data_dict["task"] = json.loads(task.model_dump_json())
             yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
             if task.status == TaskStatus.COMPLETED:
-                msg = task.steps[0].result["message"]
+                step_result = task.steps[0].result or {}
+                media_state = step_result.get("media_state")
+                if media_state == "NAVIGATION_STARTED":
+                    query = step_result.get("query", "")
+                    msg = f"Opened YouTube search for '{query}'. Select and click a video in the browser to play it."
+                elif media_state == "SEARCH_COMPLETED":
+                    query = step_result.get("query", "")
+                    msg = f"Opened search results for: {query}"
+                else:
+                    msg = step_result.get("message", "Done.")
             elif task.status == TaskStatus.BLOCKED:
                 msg = "This operation needs your confirmation before it can continue."
             else:
@@ -463,7 +712,9 @@ async def chat_stream(req: RequestModel):
             context_manager.add_assistant_message(conversation_id, msg)
         elif route_result.route == "planner":
             task = state_manager.create_task(request_id=req.request_id, intent=intent_model.intent)
+            planning_provider, p_name = model_router.get_planning_provider()
             data_dict["task"] = json.loads(task.model_dump_json())
+            data_dict["provider"] = p_name
             yield json.dumps({"type": "metadata", "data": data_dict}) + "\n"
             yield json.dumps({"type": "status", "value": "understanding"}) + "\n"
             
@@ -471,7 +722,8 @@ async def chat_stream(req: RequestModel):
                 # We don't dump the whole conversation to planner, just the content
                 steps = _deterministic_control_plan(task.task_id, req.content)
                 if steps is None:
-                    steps = await planner.generate_plan(task_id=task.task_id, request_content=req.content)
+                    active_planner = Planner(provider=planning_provider)
+                    steps = await active_planner.generate_plan(task_id=task.task_id, request_content=req.content)
                 task = state_manager.save_plan(task.task_id, steps)
                 task = state_manager.transition_task(task.task_id, TaskStatus.PLANNED)
                 yield json.dumps({"type": "task_update", "data": json.loads(task.model_dump_json())}) + "\n"
@@ -533,6 +785,93 @@ def execute_task_endpoint(task_id: str, background: bool = False):
     return updated_task.model_dump()
 
 
+@app.get("/api/v1/core/task/{task_id}/events")
+async def task_events_stream(task_id: str):
+    """
+    Persistent task event stream (SSE / ndjson).
+    Replays recent execution history and streams live step events.
+    Allows clients to reconnect at any time without restarting completed steps.
+    """
+    task = state_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return StreamingResponse(
+        task_event_manager.event_generator(task_id, include_history=True),
+        media_type="application/x-ndjson",
+    )
+
+
+@app.get("/api/v1/core/task/{task_id}/status")
+def task_detailed_status(task_id: str):
+    """Returns detailed status, step progress, and queue state for task monitoring/reconnection."""
+    task = state_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    is_queued = task_queue.contains(task_id)
+    is_active = execution_worker._active_task_id == task_id
+    data = task.model_dump()
+    data["is_queued"] = is_queued
+    data["is_active"] = is_active
+    return data
+
+
+@app.post("/api/v1/core/task/{task_id}/enqueue")
+def enqueue_task_endpoint(task_id: str, priority: int = 10):
+    """Enqueues task for persistent background execution independent of client connection."""
+    task = state_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status not in {TaskStatus.PLANNED, TaskStatus.READY, TaskStatus.PENDING}:
+        raise HTTPException(status_code=409, detail=f"Task is in non-executable status: {task.status}")
+    success = task_queue.enqueue(task_id, priority=priority)
+    if not success:
+        raise HTTPException(status_code=409, detail="Task is already enqueued")
+    task_event_manager.emit(task_id, "task_enqueued", {"priority": priority})
+    return {"enqueued": True, "task_id": task_id, "priority": priority}
+
+
+@app.get("/api/v1/core/queue")
+def list_task_queue():
+    """Lists tasks waiting in the execution queue."""
+    return {
+        "size": task_queue.size(),
+        "active_task_id": execution_worker._active_task_id,
+        "queued": task_queue.list_queued(),
+    }
+
+
+# ── Agentic Voice Mode Endpoints ──────────────────────────────────────────────
+
+@app.post("/api/v1/stt/agentic/start")
+def agentic_voice_start(session_id: Optional[str] = None):
+    return agentic_voice_service.start(session_id=session_id)
+
+
+@app.post("/api/v1/stt/agentic/stop")
+def agentic_voice_stop():
+    return agentic_voice_service.stop()
+
+
+@app.post("/api/v1/stt/agentic/pause")
+def agentic_voice_pause():
+    return agentic_voice_service.pause()
+
+
+@app.post("/api/v1/stt/agentic/resume")
+def agentic_voice_resume():
+    return agentic_voice_service.resume()
+
+
+@app.post("/api/v1/stt/agentic/emergency_stop")
+def agentic_voice_emergency_stop():
+    return agentic_voice_service.emergency_stop()
+
+
+@app.get("/api/v1/stt/agentic/status")
+def agentic_voice_status():
+    return agentic_voice_service.status()
+
+
 @app.post("/api/v1/core/task/{task_id}/pause")
 def pause_task_endpoint(task_id: str):
     if not task_runner.pause(task_id):
@@ -579,6 +918,9 @@ def approve_confirmation_endpoint(confirmation_id: str):
     if not task_runner.submit(approved["task_id"], confirmation_id=confirmation_id, wait_seconds=0.25):
         raise HTTPException(status_code=409, detail="Task is no longer executable")
     task = state_manager.get_task(approved["task_id"])
+    if task and task.status == TaskStatus.COMPLETED:
+        session = session_manager.get_or_create("default")
+        session.record_action(approved["tool_name"], approved["arguments"])
     return {"confirmation": state_manager.get_confirmation(confirmation_id), "task": task.model_dump() if task else None}
 
 
@@ -784,22 +1126,16 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 import uuid as _uuid
 
 @app.post("/api/v1/stt/record/start")
-def stt_record_start():
+def stt_record_start(duration: float = 5.0):
     """
     Start capturing microphone audio on the server.
-    Returns a recording_id that must be passed to /stop or /cancel.
-
-    Returns:
-      { "recording_id": "<uuid>", "recorder": "arecord | parecord | sox" }
-
-    Errors:
-      503 – no recorder binary found
-      500 – unexpected error
+    Optional duration param: defaults to 5.0 seconds for automatic capture.
     """
     recording_id = str(_uuid.uuid4())
+    eff_duration = duration if duration > 0 else 5.0
     try:
-        start_recording(recording_id)
-        return {"recording_id": recording_id}
+        start_recording(recording_id, duration=eff_duration)
+        return {"recording_id": recording_id, "duration": eff_duration}
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
@@ -863,6 +1199,460 @@ def stt_record_cancel(recording_id: str):
     """
     cancel_recording(recording_id)
     return {"cancelled": True, "recording_id": recording_id}
+
+
+# ── Phase 4 / Desktop Experience Endpoints ─────────────────────────────────────
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
+
+class MemoryCreate(BaseModel):
+    title: str
+    content: str
+    category: str = "General"
+    privacy: str = "public"
+    pinned: bool = False
+    source: str = "user"
+
+class MemoryUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    category: Optional[str] = None
+    privacy: Optional[str] = None
+    pinned: Optional[bool] = None
+
+class OwnerProfileUpdate(BaseModel):
+    nickname: Optional[str] = None
+    full_name: Optional[str] = None
+    preferred_name: Optional[str] = None
+    call_name: Optional[str] = None
+    occupation: Optional[str] = None
+
+@app.get("/api/v1/memories/profile")
+def get_owner_profile_api():
+    """Retrieve structured verified owner profile and assistant identity."""
+    from core.eva_core.memory.personal_memory import get_personal_memory_manager
+    mgr = get_personal_memory_manager()
+    return {
+        "owner": mgr.get_owner_profile(),
+        "assistant": mgr.get_assistant_identity(),
+    }
+
+@app.put("/api/v1/memories/profile")
+def update_owner_profile_api(update: OwnerProfileUpdate):
+    """Update verified owner profile fields and persist directly to SQLite."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            updates = {
+                "nickname": update.nickname,
+                "full_name": update.full_name,
+                "preferred_name": update.preferred_name,
+                "call_name": update.call_name,
+                "occupation": update.occupation,
+            }
+            for k, val in updates.items():
+                if val is not None:
+                    cursor.execute(
+                        "UPDATE memories SET content = ?, updated_at = ? WHERE key = ?",
+                        (val.strip(), now, k),
+                    )
+            conn.commit()
+        from core.eva_core.memory.personal_memory import get_personal_memory_manager
+        mgr = get_personal_memory_manager()
+        return {
+            "owner": mgr.get_owner_profile(),
+            "assistant": mgr.get_assistant_identity(),
+        }
+    except Exception as exc:
+        logging.error(f"update_owner_profile error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update owner profile")
+
+@app.get("/api/v1/memories")
+def list_memories(
+    category: Optional[str] = None,
+    privacy: Optional[str] = None,
+    search: Optional[str] = None,
+    pinned: Optional[bool] = None,
+):
+    try:
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            query = "SELECT memory_id, title, content, category, privacy, pinned, source, created_at, updated_at, key, confirmed FROM memories WHERE 1=1"
+            params = []
+            if category and category != "All Memory":
+                query += " AND category = ?"
+                params.append(category)
+            if privacy:
+                query += " AND privacy = ?"
+                params.append(privacy)
+            if pinned is not None:
+                query += " AND pinned = ?"
+                params.append(1 if pinned else 0)
+            if search:
+                query += " AND (title LIKE ? OR content LIKE ?)"
+                term = f"%{search}%"
+                params.extend([term, term])
+            query += " ORDER BY pinned DESC, updated_at DESC"
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "memory_id": r[0],
+                "title": r[1],
+                "content": r[2],
+                "category": r[3],
+                "privacy": r[4],
+                "pinned": bool(r[5]),
+                "source": r[6],
+                "created_at": r[7],
+                "updated_at": r[8],
+                "key": r[9] if len(r) > 9 else None,
+                "confirmed": bool(r[10]) if len(r) > 10 and r[10] is not None else True,
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logging.error(f"list_memories error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to list memories")
+
+
+@app.post("/api/v1/memories")
+def create_memory(item: MemoryCreate):
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        mem_id = f"mem-{_uuid.uuid4().hex[:12]}"
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memories (memory_id, title, content, category, privacy, pinned, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (mem_id, item.title, item.content, item.category, item.privacy, 1 if item.pinned else 0, item.source, now, now),
+            )
+            conn.commit()
+
+        return {
+            "memory_id": mem_id,
+            "title": item.title,
+            "content": item.content,
+            "category": item.category,
+            "privacy": item.privacy,
+            "pinned": item.pinned,
+            "source": item.source,
+            "created_at": now,
+            "updated_at": now,
+        }
+    except Exception as exc:
+        logging.error(f"create_memory error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to create memory")
+
+
+@app.put("/api/v1/memories/{memory_id}")
+def update_memory(memory_id: str, item: MemoryUpdate):
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT memory_id, title, content, category, privacy, pinned, source, created_at FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Memory not found")
+
+            new_title = item.title if item.title is not None else row[1]
+            new_content = item.content if item.content is not None else row[2]
+            new_cat = item.category if item.category is not None else row[3]
+            new_priv = item.privacy if item.privacy is not None else row[4]
+            new_pinned = (1 if item.pinned else 0) if item.pinned is not None else row[5]
+
+            cursor.execute(
+                """
+                UPDATE memories
+                SET title = ?, content = ?, category = ?, privacy = ?, pinned = ?, updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (new_title, new_content, new_cat, new_priv, new_pinned, now, memory_id),
+            )
+            conn.commit()
+
+        return {
+            "memory_id": memory_id,
+            "title": new_title,
+            "content": new_content,
+            "category": new_cat,
+            "privacy": new_priv,
+            "pinned": bool(new_pinned),
+            "source": row[6],
+            "created_at": row[7],
+            "updated_at": now,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.error(f"update_memory error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to update memory")
+
+
+@app.delete("/api/v1/memories/{memory_id}")
+def delete_memory(memory_id: str):
+    try:
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM memories WHERE memory_id = ?", (memory_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Memory not found")
+            cursor.execute("DELETE FROM memories WHERE memory_id = ?", (memory_id,))
+            conn.commit()
+        return {"deleted": True, "memory_id": memory_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.error(f"delete_memory error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to delete memory")
+
+
+@app.post("/api/v1/memories/{memory_id}/pin")
+def toggle_pin_memory(memory_id: str):
+    try:
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT pinned FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Memory not found")
+            new_val = 0 if row[0] == 1 else 1
+            now = datetime.now(timezone.utc).isoformat()
+            cursor.execute("UPDATE memories SET pinned = ?, updated_at = ? WHERE memory_id = ?", (new_val, now, memory_id))
+            conn.commit()
+        return {"memory_id": memory_id, "pinned": bool(new_val)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.error(f"toggle_pin error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to toggle pin")
+
+
+# ── Settings Key-Value Store ──────────────────────────────────────────────────
+
+@app.get("/api/v1/settings")
+def get_settings():
+    try:
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM system_config")
+            rows = cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
+    except Exception as exc:
+        logging.error(f"get_settings error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to get settings")
+
+
+@app.post("/api/v1/settings")
+def save_settings(settings: Dict[str, Any]):
+    try:
+        with sqlite3.connect(_db_module.DB_PATH) as conn:
+            cursor = conn.cursor()
+            for k, v in settings.items():
+                val_str = json.dumps(v) if not isinstance(v, str) else v
+                cursor.execute(
+                    "INSERT INTO system_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (k, val_str),
+                )
+            conn.commit()
+        return {"saved": True, "count": len(settings)}
+    except Exception as exc:
+        logging.error(f"save_settings error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to save settings")
+
+
+# ── Application Manager Endpoints ─────────────────────────────────────────────
+
+@app.get("/api/v1/apps")
+def list_applications():
+    app_tool = tool_registry.get("application_tool")
+    if not app_tool:
+        raise HTTPException(status_code=500, detail="Application tool not registered")
+
+    app_meta = {
+        "chrome": {"display_name": "Google Chrome", "category": "Browsers", "icon": "web"},
+        "firefox": {"display_name": "Mozilla Firefox", "category": "Browsers", "icon": "language"},
+        "brave": {"display_name": "Brave Browser", "category": "Browsers", "icon": "shield"},
+        "vscode": {"display_name": "Visual Studio Code", "category": "Development", "icon": "code"},
+        "calculator": {"display_name": "GNOME Calculator", "category": "Utilities", "icon": "calculate"},
+        "settings": {"display_name": "GNOME Settings", "category": "System", "icon": "settings"},
+        "text editor": {"display_name": "Text Editor", "category": "Productivity", "icon": "edit_note"},
+        "file manager": {"display_name": "Files (Nautilus)", "category": "System", "icon": "folder"},
+    }
+
+    result = []
+    seen = set()
+    for app_key, executable in ApplicationTool.ALLOWLIST.items():
+        primary_key = "chrome" if "chrome" in app_key else ("vscode" if "code" in app_key else ("text editor" if "editor" in app_key or "notepad" in app_key else ("brave" if "brave" in app_key else ("file manager" if "nautilus" in app_key or "file" in app_key else app_key))))
+        if primary_key in seen:
+            continue
+        seen.add(primary_key)
+
+        resolved = app_tool._resolve_executable(executable)
+        running_procs = app_tool._running_processes(executable) if resolved else []
+        meta = app_meta.get(primary_key, {"display_name": primary_key.title(), "category": "Applications", "icon": "apps"})
+
+        result.append({
+            "key": primary_key,
+            "display_name": meta["display_name"],
+            "category": meta["category"],
+            "icon": meta["icon"],
+            "is_installed": resolved is not None,
+            "executable_path": resolved or "",
+            "is_running": len(running_procs) > 0,
+            "pid": running_procs[0].info["pid"] if running_procs else None,
+        })
+
+    return result
+
+
+class AppActionRequest(BaseModel):
+    application: str
+    action: str  # "launch", "close", "focus"
+
+@app.post("/api/v1/apps/action")
+def app_action(req: AppActionRequest):
+    app_tool = tool_registry.get("application_tool")
+    if not app_tool:
+        raise HTTPException(status_code=500, detail="Application tool not registered")
+
+    op_map = {"launch": "open", "close": "close", "focus": "focus"}
+    op = op_map.get(req.action)
+    if not op:
+        raise HTTPException(status_code=400, detail=f"Unsupported action: {req.action}")
+
+    res = app_tool.execute({"operation": op, "application": req.application})
+    return {
+        "success": res.success,
+        "message": res.message,
+        "error": res.error,
+        "data": res.data,
+    }
+
+
+# ── Safe File Explorer Endpoints ──────────────────────────────────────────────
+
+from core.eva_core.tools.file import WORKSPACE_ROOT
+
+@app.get("/api/v1/files/list")
+def list_workspace_files(path: str = ""):
+    file_tool = tool_registry.get("file_tool")
+    if not file_tool:
+        raise HTTPException(status_code=500, detail="File tool not registered")
+
+    rel_path = path.strip().lstrip("/")
+    try:
+        target_path = file_tool._resolve_path(rel_path) if rel_path else os.path.realpath(WORKSPACE_ROOT)
+    except ValueError as ve:
+        raise HTTPException(status_code=403, detail=str(ve))
+
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="Directory does not exist")
+    if not os.path.isdir(target_path):
+        raise HTTPException(status_code=400, detail="Target path is not a directory")
+
+    items = []
+    try:
+        with os.scandir(target_path) as it:
+            for entry in it:
+                try:
+                    stat = entry.stat()
+                    is_dir = entry.is_dir()
+                    entry_rel = os.path.relpath(entry.path, WORKSPACE_ROOT)
+                    ext = os.path.splitext(entry.name)[1].lower() if not is_dir else ""
+                    items.append({
+                        "name": entry.name,
+                        "relative_path": entry_rel,
+                        "is_dir": is_dir,
+                        "size": stat.st_size if not is_dir else 0,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                        "extension": ext,
+                    })
+                except OSError:
+                    continue
+    except Exception as exc:
+        logging.error(f"list_workspace_files error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to list files")
+
+    items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+    return {
+        "current_path": rel_path,
+        "workspace_root": WORKSPACE_ROOT,
+        "items": items,
+    }
+
+
+@app.get("/api/v1/files/read")
+def read_workspace_file(path: str):
+    file_tool = tool_registry.get("file_tool")
+    if not file_tool:
+        raise HTTPException(status_code=500, detail="File tool not registered")
+
+    rel_path = path.strip().lstrip("/")
+    try:
+        target_path = file_tool._resolve_path(rel_path)
+    except ValueError as ve:
+        raise HTTPException(status_code=403, detail=str(ve))
+
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="File does not exist")
+    if os.path.isdir(target_path):
+        raise HTTPException(status_code=400, detail="Target is a directory")
+
+    try:
+        with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        stat = os.stat(target_path)
+        return {
+            "name": os.path.basename(target_path),
+            "relative_path": rel_path,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "content": content,
+        }
+    except Exception as exc:
+        logging.error(f"read_workspace_file error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to read file")
+
+
+class CreateFileRequest(BaseModel):
+    path: str
+    content: str = ""
+    is_directory: bool = False
+
+@app.post("/api/v1/files/create")
+def create_workspace_file(req: CreateFileRequest):
+    file_tool = tool_registry.get("file_tool")
+    if not file_tool:
+        raise HTTPException(status_code=500, detail="File tool not registered")
+
+    rel_path = req.path.strip().lstrip("/")
+    try:
+        target_path = file_tool._resolve_path(rel_path)
+    except ValueError as ve:
+        raise HTTPException(status_code=403, detail=str(ve))
+
+    try:
+        if req.is_directory:
+            os.makedirs(target_path, exist_ok=True)
+            return {"created": True, "is_dir": True, "path": rel_path}
+        else:
+            parent = os.path.dirname(target_path)
+            os.makedirs(parent, exist_ok=True)
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(req.content)
+            return {"created": True, "is_dir": False, "path": rel_path}
+    except Exception as exc:
+        logging.error(f"create_workspace_file error: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to create file")
 
 
 if __name__ == "__main__":

@@ -1,30 +1,33 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:eva_desktop/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('EVA Desktop Shell smoke test', (WidgetTester tester) async {
+    // Configure simulated desktop monitor resolution
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() => tester.view.resetPhysicalSize());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(const EvaOSApp());
+    await tester.pumpAndSettle();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    // If sidebar is collapsed (persisted from user settings), expand it for test assertions
+    final expandBtn = find.byIcon(Icons.keyboard_double_arrow_right_rounded);
+    if (expandBtn.evaluate().isNotEmpty) {
+      await tester.tap(expandBtn);
+      await tester.pumpAndSettle();
+    }
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Verify EVA branding is rendered
+    expect(find.text('EVA AI OS'), findsWidgets);
+    expect(find.text('Home'), findsWidgets);
+    expect(find.text('EVA Assistant'), findsWidgets);
+    expect(find.text('Applications'), findsWidgets);
+    expect(find.text('File Explorer'), findsWidgets);
+    expect(find.text('Memory'), findsWidgets);
+    expect(find.text('Task Manager'), findsWidgets);
+    expect(find.text('System Monitor'), findsWidgets);
+    expect(find.text('Settings'), findsWidgets);
   });
 }

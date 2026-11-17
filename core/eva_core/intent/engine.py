@@ -6,6 +6,7 @@ from core.eva_core.llm.provider import LLMProvider
 from .matcher import IntentMatcher
 
 INTENT_CATEGORIES = [
+    "personal_identity",
     "conversation",
     "information_request",
     "system_command",

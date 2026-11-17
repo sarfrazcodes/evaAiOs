@@ -45,27 +45,32 @@ def setup_db():
     conn.close()
 
 def test_persistence_across_recreation():
-    db_module.DB_PATH = TEST_DB_PATH
-    state_module.DB_PATH = TEST_DB_PATH
-    
-    if os.path.exists(TEST_DB_PATH):
-        os.remove(TEST_DB_PATH)
+    orig_db = db_module.DB_PATH
+    orig_state_db = state_module.DB_PATH
+    try:
+        db_module.DB_PATH = TEST_DB_PATH
+        state_module.DB_PATH = TEST_DB_PATH
         
-    setup_db()
-    
-    manager = TaskStateManager()
-    task = manager.create_task("req_999", "complex_task")
-    step = TaskStep(task_id=task.task_id, sequence=1, description="Persisted Step")
-    manager.save_plan(task.task_id, [step])
-    
-    # "Restart" by creating a new manager instance
-    manager2 = TaskStateManager()
-    retrieved = manager2.get_task(task.task_id)
-    
-    assert retrieved is not None
-    assert retrieved.total_steps == 1
-    assert len(retrieved.steps) == 1
-    assert retrieved.steps[0].description == "Persisted Step"
-    
-    if os.path.exists(TEST_DB_PATH):
-        os.remove(TEST_DB_PATH)
+        if os.path.exists(TEST_DB_PATH):
+            os.remove(TEST_DB_PATH)
+            
+        setup_db()
+        
+        manager = TaskStateManager()
+        task = manager.create_task("req_999", "complex_task")
+        step = TaskStep(task_id=task.task_id, sequence=1, description="Persisted Step")
+        manager.save_plan(task.task_id, [step])
+        
+        # "Restart" by creating a new manager instance
+        manager2 = TaskStateManager()
+        retrieved = manager2.get_task(task.task_id)
+        
+        assert retrieved is not None
+        assert retrieved.total_steps == 1
+        assert len(retrieved.steps) == 1
+        assert retrieved.steps[0].description == "Persisted Step"
+    finally:
+        if os.path.exists(TEST_DB_PATH):
+            os.remove(TEST_DB_PATH)
+        db_module.DB_PATH = orig_db
+        state_module.DB_PATH = orig_state_db
